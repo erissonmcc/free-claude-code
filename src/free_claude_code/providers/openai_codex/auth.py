@@ -234,6 +234,7 @@ class OpenAIAuthManager:
             user_code=self._user_code if connecting else None,
             expires_at=self._expires_at if connecting else None,
             message=self._last_error,
+            default_login_mode=ConnectedAccountLoginMode.DEVICE,
         )
 
     async def start_login(

@@ -67,3 +67,10 @@ Deploy, then verify the public `/admin` login over HTTPS and confirm that a vali
 ## Limitations
 
 This is a focused review of the authentication delta, not a complete review of the existing Admin application, its third-party scripts, or the Render account configuration.
+
+## Follow-up: OpenAI Login on Hosted Admin
+
+- Changed `OpenAIAuthManager.status()` to advertise device-code login as the default. Browser PKCE remains supported for callers that explicitly request `mode="browser"`.
+- The change only selects the already implemented device flow; it does not change token exchange, credential storage, route authorization, or exposed status fields. The Admin UI consumes `default_login_mode` when its Connect button starts the flow.
+- A remote Render process cannot receive an OAuth callback sent to the phone's `localhost:1455`; the device flow instead presents a verification URL and user code in the Admin.
+- No new attack path or privilege change identified. Tests were not run on the Termux device to avoid repeating the prior resource-heavy local test/dependency activity. `git diff --check` is the only local verification for this follow-up; a deployed device-code login still needs a fresh user-started attempt.
