@@ -55,9 +55,14 @@ def _fast_prompt(text: str) -> tuple[str, bool]:
 
 
 def _node_sdk_available() -> bool:
-    prefix = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
-    package = os.path.join(prefix, "lib", "node_modules", "@anthropic-ai", "claude-agent-sdk")
-    return bool(shutil.which("node") and os.path.isdir(package))
+    if not shutil.which("node"):
+        return False
+    candidates = [
+        os.environ.get("FCC_CLAUDE_AGENT_SDK_PATH", ""),
+        os.path.join(os.environ.get("PREFIX", ""), "lib", "node_modules", "@anthropic-ai", "claude-agent-sdk"),
+        os.path.join(os.getcwd(), "node_modules", "@anthropic-ai", "claude-agent-sdk"),
+    ]
+    return any(path and os.path.isdir(path) for path in candidates)
 
 
 def _model_option(model: CatalogModel) -> CodeModel:

@@ -1,5 +1,5 @@
 const readline = require('node:readline');
-const { query } = require('/data/data/com.termux/files/usr/lib/node_modules/@anthropic-ai/claude-agent-sdk');
+const { query } = require('@anthropic-ai/claude-agent-sdk');
 const { ClaudeTextStream, ClaudeUsageStream } = require('./claude_agent_stream.cjs');
 
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
