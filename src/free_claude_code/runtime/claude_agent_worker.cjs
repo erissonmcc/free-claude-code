@@ -1,5 +1,7 @@
 const readline = require('node:readline');
-const { query } = require('@anthropic-ai/claude-agent-sdk');
+const { query } = require(
+  process.env.FCC_CLAUDE_AGENT_SDK_PATH || require.resolve('@anthropic-ai/claude-agent-sdk'),
+);
 const { ClaudeTextStream, ClaudeUsageStream } = require('./claude_agent_stream.cjs');
 
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });

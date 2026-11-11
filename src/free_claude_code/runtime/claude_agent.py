@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import shutil
+from pathlib import Path
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -61,6 +62,7 @@ def _node_sdk_available() -> bool:
         os.environ.get("FCC_CLAUDE_AGENT_SDK_PATH", ""),
         os.path.join(os.environ.get("PREFIX", ""), "lib", "node_modules", "@anthropic-ai", "claude-agent-sdk"),
         os.path.join(os.getcwd(), "node_modules", "@anthropic-ai", "claude-agent-sdk"),
+        str(Path(__file__).resolve().parents[3] / "node_modules" / "@anthropic-ai" / "claude-agent-sdk"),
     ]
     return any(path and os.path.isdir(path) for path in candidates)
 
