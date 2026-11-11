@@ -86,7 +86,7 @@ class OpenAICodexProvider(BaseProvider):
             read_timeout_s=config.http_read_timeout,
             log_raw_sse_events=config.log_raw_sse_events,
             endpoint_transport=self._pool,
-            omitted_request_fields=frozenset({"max_output_tokens", "metadata"}),
+            omitted_request_fields=frozenset({"max_output_tokens", "metadata", "temperature"}),
         )
 
     def _endpoint(self, *, session_id: str | None = None) -> CodexEndpointContext:
@@ -208,16 +208,9 @@ class OpenAICodexProvider(BaseProvider):
 
 
 def _model_list_client_version() -> str:
-    """Format FCC's release and VCS development versions for the catalog API."""
-    if FCC_VERSION == "dev":
-        return "0.0.0-dev"
-    parsed = Version(FCC_VERSION)
-    formatted = f"{parsed.major}.{parsed.minor}.{parsed.micro}"
-    if parsed.dev is not None:
-        formatted += f"-dev.{parsed.dev}"
-    if parsed.local is not None:
-        formatted += f"+{parsed.local}"
-    return formatted
+    """Return a Codex client version accepted by the ChatGPT catalog API."""
+    return "0.162.1"
+
 
 
 async def _endpoint_required() -> str:

@@ -18,6 +18,11 @@ from free_claude_code.core.anthropic.native import (
 )
 from free_claude_code.core.anthropic.native_stream import NativeMessagesRelay
 from free_claude_code.core.failures import ExecutionFailure
+from free_claude_code.core.context_hook import (
+    current_context_input_estimate,
+    prepare_outbound_context,
+    record_provider_usage,
+)
 from free_claude_code.core.history_replay import ReplayOrigin, prepare_history
 from free_claude_code.core.json_types import JsonObject
 from free_claude_code.core.openai_responses import (
@@ -304,6 +309,7 @@ class AnthropicMessagesTransport:
             stream_opened = False
             sent_body = body
             presenter: _Presenter | None = None
+            provider_usage: dict[str, int] = {}
             try:
                 attempt = await execution.open_attempt(operation_kind)
                 scope = ProviderAttemptScope(
@@ -319,6 +325,9 @@ class AnthropicMessagesTransport:
                     endpoint=endpoint,
                 )
                 sent_body = prepare_history(body, origin)
+                sent_body = await prepare_outbound_context(
+                    "messages", sent_body, self._provider_name
+                )
                 presenter = presenter_factory(origin)
                 headers = httpx.Headers(
                     {
@@ -358,6 +367,20 @@ class AnthropicMessagesTransport:
                     )
                 stream_opened = True
                 async for event_type, payload in messages_events(response):
+                    usage_payloads = [payload.get("usage")]
+                    message = payload.get("message")
+                    if event_type == "message_start" and isinstance(message, dict):
+                        usage_payloads.append(message.get("usage"))
+                    for usage_payload in usage_payloads:
+                        if not isinstance(usage_payload, dict):
+                            continue
+                        provider_usage.update(
+                            {
+                                key: value
+                                for key, value in usage_payload.items()
+                                if isinstance(value, int) and not isinstance(value, bool)
+                            }
+                        )
                     normal_stop_seen |= is_messages_stop(event_type, payload)
                     check_messages_failure(event_type, payload)
                     source.observe(
@@ -379,6 +402,56 @@ class AnthropicMessagesTransport:
                     )
                 for event in recovery.flush():
                     yield event
+                input_count = provider_usage.get("input_tokens")
+                output_count = provider_usage.get("output_tokens")
+                cache_read = provider_usage.get("cache_read_input_tokens")
+                cache_create = provider_usage.get("cache_creation_input_tokens")
+                total_input = (
+                    input_count + cache_read + cache_create
+                    if input_count is not None and cache_read is not None and cache_create is not None
+                    else None
+                )
+                await record_provider_usage(
+                    provider=self._provider_name,
+                    model=str(sent_body.get("model", "unknown")),
+                    protocol="messages",
+                    actual_input_tokens=total_input,
+                    normal_input_tokens=input_count,
+                    cached_input_tokens=cache_read,
+                    cache_creation_input_tokens=cache_create,
+                    output_tokens=output_count,
+                    total_tokens=(total_input + output_count if total_input is not None and output_count is not None else None),
+                )
+                context_estimate = current_context_input_estimate()
+                trace_event(
+                    stage="provider",
+                    event="provider.response.completed",
+                    source="provider",
+                    provider=self._provider_name,
+                    request_id=execution.request_id,
+                    transport="messages",
+                    actual_input_tokens=total_input,
+                    normal_input_tokens=input_count,
+                    context_input_estimate_tokens=context_estimate,
+                    context_input_estimate_delta=(
+                        total_input - context_estimate
+                        if total_input is not None and context_estimate is not None
+                        else None
+                    ),
+                    cached_input_tokens=cache_read,
+                    cache_hit_fraction=(
+                        cache_read / total_input
+                        if cache_read is not None and total_input is not None and total_input > 0
+                        else None
+                    ),
+                    cache_creation_input_tokens=cache_create,
+                    output_tokens=output_count,
+                    total_tokens=(
+                        total_input + output_count
+                        if total_input is not None and output_count is not None
+                        else None
+                    ),
+                )
                 return
             except asyncio.CancelledError, GeneratorExit:
                 raise

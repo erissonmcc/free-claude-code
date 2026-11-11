@@ -16,7 +16,6 @@ from free_claude_code.application.routing import supports_native_messages
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.gateway_model_ids import (
     desktop_model_id,
-    gateway_model_id,
     no_thinking_gateway_model_id,
 )
 from free_claude_code.core.model_capabilities import ModelInputModality
@@ -201,7 +200,7 @@ def _build_claude_models_response(
         if native or model.supports_reasoning is not False:
             models.append(
                 _discovered_model_response(
-                    desktop_model_id(ref) if desktop else gateway_model_id(ref),
+                    desktop_model_id(ref) if desktop else ref,
                     display_name=ref,
                 )
             )

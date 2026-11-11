@@ -39,6 +39,12 @@ _MESSAGING_COLUMNS = {
     "messaging_managed_messages": "sequence platform chat_id message_id ts direction kind",
     "messaging_legacy_import": "source outcome trees messages skipped cleanup_pending",
 }
+_TOKEN_USAGE_COLUMNS = {
+    "token_usage_attempts": "id occurred_at provider model protocol request_kind estimated_input_before estimated_input_after estimated_tokens_saved estimated_messages_before estimated_messages_after internal_summary_calls actual_input_tokens normal_input_tokens cached_input_tokens cache_creation_input_tokens output_tokens total_tokens",
+}
+_VERTEX_CACHE_COLUMNS = {
+    "vertex_cached_contents": "cache_key resource_name model endpoint_key prefix_tokens created_at expires_at ttl_seconds",
+}
 
 
 def _connect(
@@ -73,6 +79,10 @@ def _schema_version(connection: sqlite3.Connection) -> int:
     if version == 0 and not tables:
         return version
     columns = _BASE_COLUMNS | (_MESSAGING_COLUMNS if version >= 4 else {})
+    if version >= 8:
+        columns |= _TOKEN_USAGE_COLUMNS
+    if version >= 11:
+        columns |= _VERTEX_CACHE_COLUMNS
     if tables != columns.keys():
         raise sqlite3.DatabaseError(
             "Unrecognized FCC database schema. Saved data was preserved."
@@ -85,6 +95,12 @@ def _schema_version(connection: sqlite3.Connection) -> int:
             expected.add("native_permission_defaults")
         if version >= 3 and table == "code_sessions":
             expected.add("context_used_tokens")
+        if version >= 7 and table == "code_runs":
+            expected.add("consumed_tokens")
+        if version >= 9 and table == "token_usage_attempts":
+            expected.update({"cache_prefix_key", "cache_prefix_tokens", "cache_observation_version"})
+        if version >= 10 and table == "token_usage_attempts":
+            expected.add("cache_endpoint_key")
         actual = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
         if not expected <= actual:
             raise sqlite3.DatabaseError(f"Incomplete FCC database schema in {table}.")
@@ -171,6 +187,8 @@ def initialize_database(path: Path, legacy_path: Path | None = None) -> None:
         for next_version, upgrade in MIGRATIONS:
             if next_version <= version:
                 continue
+            if next_version == 6:
+                connection.execute("PRAGMA foreign_keys=OFF")
             connection.execute("BEGIN IMMEDIATE")
             try:
                 upgrade(connection)
@@ -187,6 +205,9 @@ def initialize_database(path: Path, legacy_path: Path | None = None) -> None:
                 if connection.in_transaction:
                     connection.execute("ROLLBACK")
                 raise
+            finally:
+                if next_version == 6:
+                    connection.execute("PRAGMA foreign_keys=ON")
 
 
 class SQLiteDatabase:

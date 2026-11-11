@@ -5,7 +5,9 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from collections.abc import Mapping
+from pathlib import Path
 from contextlib import suppress
 
 from .lifecycle import drain_owned
@@ -39,7 +41,16 @@ def profile_environment(source: Mapping[str, str] | None = None) -> dict[str, st
 
 
 async def verified_cli_path(env: Mapping[str, str]) -> str:
-    path = shutil.which("copilot", path=env.get("PATH"))
+    # Termux/Android can override the CLI launcher (for example, a proot-distro
+    # shim) without changing the pinned Copilot SDK contract.
+    configured = env.get("FCC_COPILOT_CLI", "").strip()
+    if not configured and sys.platform == "android":
+        termux_launcher = Path(__file__).with_name("termux_cli.sh")
+        if termux_launcher.is_file() and os.access(termux_launcher, os.X_OK):
+            configured = str(termux_launcher)
+    path = configured or shutil.which("copilot", path=env.get("PATH"))
+    if path and configured and not os.path.isabs(path):
+        path = shutil.which(path, path=env.get("PATH"))
     if path is None:
         raise CopilotUnavailable(
             f"Install GitHub Copilot CLI {COPILOT_CLI_VERSION}, then connect again."
@@ -70,6 +81,11 @@ async def verified_cli_path(env: Mapping[str, str]) -> str:
         )
         is None
     ):
+        if sys.platform == "android":
+            raise CopilotUnavailable(
+                f"GitHub Copilot CLI {COPILOT_CLI_VERSION} could not start with the Termux compatibility launcher. "
+                "Check the Termux Copilot installation and reconnect."
+            )
         raise CopilotUnavailable(
             f"FCC requires GitHub Copilot CLI {COPILOT_CLI_VERSION} for its pinned SDK. Install that version and reconnect."
         )

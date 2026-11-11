@@ -29,7 +29,7 @@ class CodeSession(Record):
     model: str
     reasoning_effort: str | None = None
     mode: CodeMode = "config"
-    harness: Literal["codex"] = "codex"
+    harness: Literal["codex", "claude"] = "codex"
     title: str = "New code session"
     auto_title: bool = True
     native_thread_id: str | None = None
@@ -59,6 +59,7 @@ class CodeRun(Record):
     error_details: JsonObject = Field(default_factory=dict)
     created_at: int = Field(default_factory=now_ms)
     finished_at: int | None = None
+    consumed_tokens: int | None = None
 
 
 class CodeItem(Record):
@@ -194,10 +195,12 @@ class HarnessEvent:
         "error",
         "notice",
         "context_usage",
+        "run_usage",
         "closed",
     ]
     turn_id: str | None = None
     context_used_tokens: int | None = None
+    consumed_tokens: int | None = None
     item: ItemUpdate | None = None
     prompt: PromptRequest | None = None
     request_id: str | int | None = None

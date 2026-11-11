@@ -7,6 +7,7 @@ import httpx
 
 from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.core.anthropic import ReasoningReplayMode
+from free_claude_code.core.model_capabilities import ModelInputModality
 from free_claude_code.providers.admission import (
     ProviderAdmissionController,
     ProviderOperationKind,
@@ -18,9 +19,9 @@ from free_claude_code.providers.google_openai import (
     validate_google_extra_body,
 )
 from free_claude_code.providers.http import maybe_await_aclose
+from free_claude_code.core.context_hook import current_context_cache_observation
 from free_claude_code.providers.model_listing import (
     ModelListResponseError,
-    model_infos_from_ids,
 )
 from free_claude_code.providers.openai_chat import (
     OpenAIChatProfile,
@@ -28,6 +29,7 @@ from free_claude_code.providers.openai_chat import (
 )
 
 from .auth import GoogleAccessTokenProvider
+from .context_cache import VertexContextCacheAdapter
 from .endpoint import vertex_openai_base_url, vertex_publisher_models_url
 from .models import extract_vertex_model_page
 
@@ -51,6 +53,9 @@ class VertexProvider(GoogleOpenAIProvider):
         location: str,
         admission: ProviderAdmissionController,
         access_token_provider: GoogleAccessTokenProvider | None = None,
+        cache_store=None,
+        cache_readiness=None,
+        cache_prices=(),
     ) -> None:
         self._project_id = project_id.strip()
         self._location = location.strip().lower()
@@ -68,12 +73,42 @@ class VertexProvider(GoogleOpenAIProvider):
                 write=config.http_write_timeout,
             ),
         )
+        self._cache_client = None
+        request_body_preparer = None
+        if cache_store is not None and cache_readiness is not None and cache_prices:
+            self._cache_client = httpx.AsyncClient(
+                proxy=config.proxy,
+                timeout=httpx.Timeout(
+                    config.http_read_timeout,
+                    connect=config.http_connect_timeout,
+                    read=config.http_read_timeout,
+                    write=config.http_write_timeout,
+                ),
+            )
+            self._context_cache = VertexContextCacheAdapter(
+                project_id=self._project_id,
+                location=self._location,
+                access_token_provider=self._access_token_provider,
+                client=self._cache_client,
+                store=cache_store,
+                readiness=cache_readiness,
+                prices=cache_prices,
+            )
+
+            async def prepare_cached_body(body):
+                return await self._context_cache.prepare(
+                    body, observation=current_context_cache_observation()
+                )
+
+            request_body_preparer = prepare_cached_body
         super().__init__(
             replace(config, base_url=base_url),
             profile=_PROFILE,
             admission=admission,
             api_key_provider=self._access_token_provider,
             default_headers={"x-goog-user-project": self._project_id},
+            request_body_preparer=request_body_preparer,
+            context_endpoint_scope=base_url + "|" + self._project_id,
         )
 
     async def cleanup(self) -> None:
@@ -82,6 +117,8 @@ class VertexProvider(GoogleOpenAIProvider):
             await super().cleanup()
         finally:
             await self._model_list_client.aclose()
+            if self._cache_client is not None:
+                await self._cache_client.aclose()
 
     async def list_model_infos(self) -> frozenset[ProviderModelInfo]:
         """List Vertex publisher models and translate their resource names."""
@@ -104,7 +141,21 @@ class VertexProvider(GoogleOpenAIProvider):
                 "VERTEX model-list response is malformed: response did not include "
                 "any model ids"
             )
-        return model_infos_from_ids(model_ids)
+        # Vertex publisher-model discovery returns IDs only. Codex uses the
+        # advertised input modalities to decide whether its native view_image
+        # tool is available, so declare image input for Gemini generation models.
+        return frozenset(
+            ProviderModelInfo(
+                model_id=model_id,
+                input_modalities=(
+                    frozenset({ModelInputModality.TEXT, ModelInputModality.IMAGE})
+                    if model_id.startswith("google/gemini-")
+                    and "embedding" not in model_id.lower()
+                    else None
+                ),
+            )
+            for model_id in model_ids
+        )
 
     async def _list_model_page(self, page_token: str | None) -> Any:
         async def request() -> httpx.Response:

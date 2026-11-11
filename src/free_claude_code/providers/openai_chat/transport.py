@@ -37,6 +37,11 @@ from free_claude_code.core.diagnostics import (
     redacted_exception_traceback,
 )
 from free_claude_code.core.failures import ExecutionFailure, FailureKind
+from free_claude_code.core.context_hook import (
+    current_context_input_estimate,
+    prepare_outbound_context,
+    record_provider_usage,
+)
 from free_claude_code.core.history_replay import prepare_history
 from free_claude_code.core.json_types import JsonObject
 from free_claude_code.core.openai_responses import (
@@ -135,6 +140,7 @@ from .usage import (
 OpenAIAsyncCredentialProvider = Callable[[], Awaitable[str]]
 _ExtraReasoningEvents = Callable[[Any, ChatStreamOutput], Iterator[str]]
 _ChatOutputFactory = Callable[[], ChatStreamOutput]
+RequestBodyPreparer = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -479,6 +485,8 @@ class OpenAIChatTransport:
         log_raw_sse_events: bool,
         log_api_error_tracebacks: bool,
         endpoint_transport: httpx2.AsyncBaseTransport | None = None,
+        request_body_preparer: RequestBodyPreparer | None = None,
+        context_endpoint_scope: str | None = None,
     ) -> None:
         self._client = client
         self._admission = admission
@@ -489,6 +497,8 @@ class OpenAIChatTransport:
         self._log_raw_sse_events = log_raw_sse_events
         self._log_api_error_tracebacks = log_api_error_tracebacks
         self._endpoint_transport = endpoint_transport
+        self._request_body_preparer = request_body_preparer
+        self._context_endpoint_scope = context_endpoint_scope
         self._model_output_caps: dict[str, int] = {}
 
     def _log_stream_transport_error(
@@ -651,6 +661,20 @@ class OpenAIChatTransport:
                         structured_details=self._profile.structured_reasoning_details,
                     ),
                 )
+                context_scope = {}
+                if endpoint is not None and endpoint.snapshot is not None:
+                    context_scope["endpoint_scope"] = (
+                        endpoint.snapshot.base_url
+                        + "|"
+                        + (endpoint.snapshot.account_id or "")
+                    )
+                elif self._context_endpoint_scope is not None:
+                    context_scope["endpoint_scope"] = self._context_endpoint_scope
+                create_body = await prepare_outbound_context(
+                    "chat", create_body, self._provider_name, **context_scope
+                )
+                if self._request_body_preparer is not None:
+                    create_body = await self._request_body_preparer(create_body)
                 stream = OpenAIStreamAdapter(
                     await client.chat.completions.create(
                         **create_body,
@@ -1161,6 +1185,34 @@ class _OpenAIChatStreamRunner:
                 completion.provider_input_tokens,
                 completion.provider_input_tokens - self._input_tokens,
             )
+        cached_input = self._transport._behavior.cached_input_tokens(assembler.usage_info)
+        provider_input_actual = completion.provider_input_tokens
+        output_actual = usage_int(assembler.usage_info, "completion_tokens")
+        cached_actual = self._transport._behavior.cached_input_tokens(assembler.usage_info)
+        cache_creation_actual = self._transport._behavior.cache_write_input_tokens(assembler.usage_info)
+        await record_provider_usage(
+            provider=tag,
+            model=(
+                assembler.output.replay_origin.model
+                if assembler.output.replay_origin is not None
+                else self._response_model
+            ),
+            protocol="chat",
+            actual_input_tokens=provider_input_actual,
+            normal_input_tokens=(
+                provider_input_actual - cached_actual
+                if provider_input_actual is not None and cached_actual is not None
+                and 0 <= cached_actual <= provider_input_actual else None
+            ),
+            cached_input_tokens=cached_actual,
+            cache_creation_input_tokens=cache_creation_actual,
+            output_tokens=output_actual,
+            total_tokens=(
+                provider_input_actual + output_actual
+                if provider_input_actual is not None and output_actual is not None else None
+            ),
+        )
+        context_estimate = current_context_input_estimate()
         trace_event(
             stage="provider",
             event="provider.response.completed",
@@ -1175,14 +1227,49 @@ class _OpenAIChatStreamRunner:
             output_tokens=completion.output_tokens,
             prompt_tokens=completion.input_tokens,
             prompt_tokens_estimate=self._input_tokens,
+            actual_input_tokens=completion.provider_input_tokens,
+            context_input_estimate_tokens=context_estimate,
+            context_input_estimate_delta=(
+                completion.provider_input_tokens - context_estimate
+                if completion.provider_input_tokens is not None
+                and context_estimate is not None else None
+            ),
+            cached_input_tokens=self._transport._behavior.cached_input_tokens(
+                assembler.usage_info
+            ),
+            normal_input_tokens=(
+                completion.provider_input_tokens - cached_input
+                if completion.provider_input_tokens is not None
+                and cached_input is not None
+                and 0 <= cached_input <= completion.provider_input_tokens
+                else None
+            ),
+            cache_hit_fraction=(
+                cached_input / completion.provider_input_tokens
+                if cached_input is not None
+                and completion.provider_input_tokens is not None
+                and completion.provider_input_tokens > 0
+                and 0 <= cached_input <= completion.provider_input_tokens
+                else None
+            ),
+            cache_creation_input_tokens=self._transport._behavior.cache_write_input_tokens(
+                assembler.usage_info
+            ),
+            output_tokens_actual=usage_int(assembler.usage_info, "completion_tokens"),
+            total_tokens_actual=(
+                (usage_int(assembler.usage_info, "prompt_tokens") or 0)
+                + (usage_int(assembler.usage_info, "completion_tokens") or 0)
+                if usage_int(assembler.usage_info, "prompt_tokens") is not None
+                and usage_int(assembler.usage_info, "completion_tokens") is not None
+                else None
+            ),
         )
         usage = ChatStreamUsage(
             input_tokens=completion.input_tokens,
             output_tokens=completion.output_tokens,
             cached_tokens=self._transport._behavior.cached_input_tokens(
                 assembler.usage_info
-            )
-            or 0,
+            ) or 0,
             cache_write_tokens=self._transport._behavior.cache_write_input_tokens(
                 assembler.usage_info
             ),

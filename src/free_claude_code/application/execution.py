@@ -35,6 +35,13 @@ from free_claude_code.core.trace import (
 )
 
 from .ports import ModelInfoLookup, ProviderResolver
+from .context_runtime import RequestContextRuntime
+from free_claude_code.core.context_hook import (
+    install_context_preparer,
+    install_usage_recorder,
+    reset_context_preparer,
+    reset_usage_recorder,
+)
 from .routing import (
     ProviderModelTarget,
     ResolvedModelRoute,
@@ -64,6 +71,8 @@ class ProviderExecutor:
         log_raw_payloads: bool = False,
         request_headers: Mapping[str, str] | None = None,
         model_info_lookup: ModelInfoLookup | None = None,
+        context_settings=None,
+        usage_recorder=None,
     ) -> None:
         if not math.isfinite(progress_timeout_seconds) or progress_timeout_seconds <= 0:
             raise ValueError("progress_timeout_seconds must be finite and positive")
@@ -74,6 +83,11 @@ class ProviderExecutor:
         self._generation_id = generation_id
         self._log_raw_payloads = log_raw_payloads
         self._request_headers = MappingProxyType(dict(request_headers or {}))
+        self._context_settings = context_settings
+        self._usage_recorder = usage_recorder
+        self._context_growth_estimates: dict[
+            tuple[str, str, str, str], tuple[str, int]
+        ] = {}
         self._progress_timeout_seconds = float(progress_timeout_seconds)
 
     def _progress_timeout_failure(
@@ -531,8 +545,46 @@ class ProviderExecutor:
         if self._generation_id is not None:
             stream_trace["generation_id"] = self._generation_id
 
+        async def managed_provider_body() -> AsyncIterator[str]:
+            if self._context_settings is None:
+                source = provider_body()
+                try:
+                    async for chunk in source:
+                        yield chunk
+                finally:
+                    await source.aclose()
+                return
+            context_runtime = RequestContextRuntime(
+                self._context_settings,
+                self._provider_resolver,
+                request_id=request_id,
+                request_headers=self._request_headers,
+                model_info_lookup=self._model_info_lookup,
+                growth_estimates=self._context_growth_estimates,
+            )
+            source = provider_body()
+            try:
+                while True:
+                    token = install_context_preparer(context_runtime.prepare)
+                    usage_token = (
+                        install_usage_recorder(self._usage_recorder)
+                        if self._usage_recorder is not None
+                        else None
+                    )
+                    try:
+                        chunk = await source.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    finally:
+                        reset_context_preparer(token)
+                        if usage_token is not None:
+                            reset_usage_recorder(usage_token)
+                    yield chunk
+            finally:
+                await source.aclose()
+
         return traced_async_stream(
-            provider_body(),
+            managed_provider_body(),
             stage="egress",
             source="api",
             complete_event=(

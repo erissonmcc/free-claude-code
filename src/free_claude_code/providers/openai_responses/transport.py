@@ -18,6 +18,11 @@ from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.core.anthropic.models import MessagesRequest
 from free_claude_code.core.diagnostics import extract_upstream_error_detail
 from free_claude_code.core.failures import ExecutionFailure, FailureKind
+from free_claude_code.core.context_hook import (
+    current_context_input_estimate,
+    prepare_outbound_context,
+    record_provider_usage,
+)
 from free_claude_code.core.history_replay import (
     prepare_history,
     preserve_responses_reasoning,
@@ -68,6 +73,9 @@ from free_claude_code.providers.history_replay import (
 from free_claude_code.providers.http import ProviderAttemptScope, maybe_await_aclose
 from free_claude_code.providers.openai_client import OpenAIRequestClient
 from free_claude_code.providers.openai_stream import OpenAIStreamAdapter
+from free_claude_code.providers.openai_responses.prompt_cache import (
+    add_explicit_prompt_cache_breakpoint,
+)
 from free_claude_code.providers.reasoning_compatibility import (
     ReasoningCorrection,
     prepare_messages_reasoning,
@@ -369,6 +377,7 @@ class OpenAIResponsesTransport:
 
             scope: ProviderAttemptScope | None = None
             stream_opened = False
+            provider_usage: Mapping[str, object] | None = None
             try:
                 client = (
                     request_client.for_endpoint(self._client, await endpoint.resolve())
@@ -383,6 +392,11 @@ class OpenAIResponsesTransport:
                     endpoint=endpoint.snapshot if endpoint is not None else None,
                 )
                 sent_body = prepare_history(body, origin)
+                sent_body = await prepare_outbound_context(
+                    "responses", sent_body, self._provider_name
+                )
+                if self._provider_name.lower() == "openai":
+                    sent_body = add_explicit_prompt_cache_breakpoint(sent_body)
                 attempt = await execution.open_attempt(operation_kind)
                 scope = ProviderAttemptScope(
                     attempt,
@@ -457,7 +471,10 @@ class OpenAIResponsesTransport:
                         and response["model"]
                     ):
                         origin = replace(origin, model=response["model"])
-                    payload = preserve_responses_reasoning(payload, origin)
+                    if isinstance(response, dict) and isinstance(response.get("usage"), dict):
+                        provider_usage = response["usage"]
+                    if not isinstance(presenter, NativeResponsesPresenter):
+                        payload = preserve_responses_reasoning(payload, origin)
                     for event in presenter.feed(upstream_event.type, payload):
                         for held in recovery.push(event):
                             yield held
@@ -469,6 +486,41 @@ class OpenAIResponsesTransport:
                     )
                 for event in recovery.flush():
                     yield event
+                actual_input = _usage_number(provider_usage, "input_tokens")
+                cached_input = (
+                    _usage_number(
+                        provider_usage.get("input_tokens_details"), "cached_tokens"
+                    ) if provider_usage is not None else None
+                )
+                cache_write_input = (
+                    _usage_number(
+                        provider_usage.get("input_tokens_details"), "cache_write_tokens"
+                    ) if provider_usage is not None else None
+                )
+                output_count = (
+                    _usage_number(provider_usage, "output_tokens")
+                    if provider_usage is not None else None
+                )
+                total_count = (
+                    _usage_number(provider_usage, "total_tokens")
+                    if provider_usage is not None else None
+                )
+                await record_provider_usage(
+                    provider=self._provider_name,
+                    model=str(sent_body.get("model", "unknown")),
+                    protocol="responses",
+                    actual_input_tokens=actual_input,
+                    normal_input_tokens=(
+                        actual_input - cached_input
+                        if actual_input is not None and cached_input is not None
+                        and 0 <= cached_input <= actual_input else None
+                    ),
+                    cached_input_tokens=cached_input,
+                    cache_creation_input_tokens=cache_write_input,
+                    output_tokens=output_count,
+                    total_tokens=total_count,
+                )
+                context_estimate = current_context_input_estimate()
                 trace_event(
                     stage="provider",
                     event="provider.response.completed",
@@ -476,6 +528,33 @@ class OpenAIResponsesTransport:
                     provider=self._provider_name,
                     request_id=request_id,
                     transport="responses",
+                    actual_input_tokens=actual_input,
+                    context_input_estimate_tokens=context_estimate,
+                    context_input_estimate_delta=(
+                        actual_input - context_estimate
+                        if actual_input is not None and context_estimate is not None
+                        else None
+                    ),
+                    normal_input_tokens=(
+                        actual_input - cached_input
+                        if actual_input is not None and cached_input is not None
+                        and 0 <= cached_input <= actual_input else None
+                    ),
+                    cached_input_tokens=cached_input,
+                    cache_hit_fraction=(
+                        cached_input / actual_input
+                        if actual_input is not None and actual_input > 0
+                        and cached_input is not None and 0 <= cached_input <= actual_input
+                        else None
+                    ),
+                    output_tokens=(
+                        _usage_number(provider_usage, "output_tokens")
+                        if provider_usage is not None else None
+                    ),
+                    total_tokens=(
+                        _usage_number(provider_usage, "total_tokens")
+                        if provider_usage is not None else None
+                    ),
                 )
                 return
             except asyncio.CancelledError, GeneratorExit:
@@ -675,6 +754,13 @@ def _effective_error(error: Exception) -> Exception:
         marker in code for marker in ("server", "internal", "unavailable", "timeout")
     )
     return ExecutionFailure(FailureKind.UPSTREAM, 502, message, retryable)
+
+
+def _usage_number(value: object, key: str) -> int | None:
+    if not isinstance(value, Mapping):
+        return None
+    number = value.get(key)
+    return number if isinstance(number, int) and not isinstance(number, bool) else None
 
 
 def _trace_early_retry(

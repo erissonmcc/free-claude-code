@@ -54,8 +54,20 @@ from tests.providers.support import REASONING_ON, immediate_admission
     ],
     ids=["mandatory", "unsupported_value"],
 )
-async def test_tolerant_classifier_corrects_required_reasoning(stream_error, error):
+async def test_tolerant_classifier_corrects_required_reasoning(
+    stream_error, error, monkeypatch
+):
     bodies = []
+    prepared_bodies = []
+
+    async def prepare(protocol, body, provider):
+        prepared_bodies.append((protocol, dict(body), provider))
+        return dict(body)
+
+    monkeypatch.setattr(
+        "free_claude_code.providers.openai_responses.transport.prepare_outbound_context",
+        prepare,
+    )
 
     def handler(request):
         body = json.loads(request.content)
@@ -91,8 +103,37 @@ async def test_tolerant_classifier_corrects_required_reasoning(stream_error, err
         assert bodies[0]["reasoning"]["effort"] == "none"
         assert "max_output_tokens" not in bodies[0]
         assert "reasoning" not in bodies[1]
+        assert len(prepared_bodies) == 2
+        assert prepared_bodies[0][1]["reasoning"]["effort"] == "none"
+        assert "reasoning" not in prepared_bodies[1][1]
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_responses_outbound_context_hook_runs_at_final_sdk_boundary(monkeypatch):
+    seen = []
+
+    async def prepare(protocol, body, provider):
+        seen.append((protocol, body.get("model"), provider))
+        return dict(body)
+
+    monkeypatch.setattr(
+        "free_claude_code.providers.openai_responses.transport.prepare_outbound_context",
+        prepare,
+    )
+    client = _client(lambda _request: httpx2.Response(
+        200,
+        headers={"content-type": "text/event-stream"},
+        text=_sse(_text_delta("ok"), _completed_event()),
+    ))
+    try:
+        await _collect_native(
+            _transport(client), OpenAIResponsesRequest(model="route", input="hello")
+        )
+    finally:
+        await client.close()
+    assert seen == [("responses", "route", "TEST_RESPONSES")]
 
 
 def _request(**overrides: object) -> MessagesRequest:
@@ -111,6 +152,7 @@ def _completed_response(
     model: str = "upstream-model",
     input_tokens: int = 8,
     cached_tokens: int = 3,
+    cache_write_tokens: int | None = None,
     output_tokens: int = 2,
 ) -> dict[str, object]:
     return {
@@ -144,7 +186,14 @@ def _completed_response(
         "truncation": "disabled",
         "usage": {
             "input_tokens": input_tokens,
-            "input_tokens_details": {"cached_tokens": cached_tokens},
+            "input_tokens_details": {
+                "cached_tokens": cached_tokens,
+                **(
+                    {"cache_write_tokens": cache_write_tokens}
+                    if cache_write_tokens is not None
+                    else {}
+                ),
+            },
             "output_tokens": output_tokens,
             "output_tokens_details": {"reasoning_tokens": 0},
             "total_tokens": input_tokens + output_tokens,
@@ -196,14 +245,15 @@ def _transport(
     *,
     max_attempts: int = 5,
     tool_policy: ResponsesToolPolicy = ResponsesToolPolicy(),
+    provider_name: str = "TEST_RESPONSES",
 ):
     return OpenAIResponsesTransport(
         client=client,
         admission=immediate_admission(
-            provider_name="TEST_RESPONSES",
+            provider_name=provider_name,
             max_attempts=max_attempts,
         ),
-        provider_name="TEST_RESPONSES",
+        provider_name=provider_name,
         read_timeout_s=120.0,
         log_raw_sse_events=False,
         tool_policy=tool_policy,
@@ -277,6 +327,75 @@ async def test_default_transport_keeps_native_tool_capabilities() -> None:
         )
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_marks_only_stable_instruction_prefix_for_explicit_cache():
+    captured = []
+
+    def handler(request):
+        captured.append(json.loads(request.content))
+        return httpx2.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=_sse(_completed_event()),
+        )
+
+    client = _client(handler)
+    transport = _transport(client, provider_name="OpenAI")
+    instructions = "stable reference " * 1200
+    try:
+        await _collect_native(
+            transport,
+            OpenAIResponsesRequest(
+                model="gpt-6.1-sol", instructions=instructions, input="new question"
+            ),
+        )
+    finally:
+        await client.close()
+
+    assert captured[0]["prompt_cache_options"] == {"mode": "implicit", "ttl": "30m"}
+    assert captured[0]["input"][0] == {
+        "role": "developer",
+        "content": [{
+            "type": "input_text",
+            "text": instructions,
+            "prompt_cache_breakpoint": {"mode": "explicit", "ttl": "30m"},
+        }],
+    }
+    assert captured[0]["input"][-1] == {"role": "user", "content": "new question"}
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_records_actual_cache_write_tokens(monkeypatch):
+    recorded = []
+
+    async def record(**usage):
+        recorded.append(usage)
+
+    monkeypatch.setattr(
+        "free_claude_code.providers.openai_responses.transport.record_provider_usage",
+        record,
+    )
+    response = _completed_response(cache_write_tokens=5)
+    client = _client(lambda _request: httpx2.Response(
+        200,
+        headers={"content-type": "text/event-stream"},
+        text=_sse({
+            "type": "response.completed",
+            "sequence_number": 0,
+            "response": response,
+        }),
+    ))
+    try:
+        await _collect_native(
+            _transport(client, provider_name="OpenAI"),
+            OpenAIResponsesRequest(model="gpt-6.1-sol", input="question"),
+        )
+    finally:
+        await client.close()
+
+    assert recorded[0]["cache_creation_input_tokens"] == 5
 
 
 @pytest.mark.asyncio
@@ -653,6 +772,40 @@ async def test_native_responses_applies_resolved_reasoning_override() -> None:
         await client.close()
 
     assert captured[0]["reasoning"] == {"effort": "none"}
+
+
+@pytest.mark.asyncio
+async def test_native_responses_returns_upstream_encrypted_reasoning_unchanged() -> None:
+    encrypted = "provider-native-ciphertext"
+    response = _completed_response()
+    response["output"] = [
+        {"type": "reasoning", "id": "rs_native", "summary": [], "encrypted_content": encrypted}
+    ]
+
+    def handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=_sse({
+                "type": "response.completed",
+                "sequence_number": 1,
+                "response": response,
+            }),
+        )
+
+    client = _client(handler)
+    try:
+        chunks = await _collect_native(
+            _transport(client), OpenAIResponsesRequest(model="upstream-model", input="hello")
+        )
+    finally:
+        await client.close()
+
+    events = parse_sse_text("".join(chunks))
+    terminal = next(event.data for event in events if event.event == "response.completed")
+    item = terminal["response"]["output"][0]
+    assert item["encrypted_content"] == encrypted
+    assert not item["encrypted_content"].startswith("fcc:history:")
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,7 @@
+#!/data/data/com.termux/files/home/free-claude-code/.venv/bin/python
+import sys
+
+from free_claude_code.cli.launchers.claude import launch_cli
+
+if __name__ == "__main__":
+    sys.exit(launch_cli())

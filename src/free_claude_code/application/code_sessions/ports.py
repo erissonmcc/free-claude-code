@@ -106,6 +106,8 @@ class CodeStore(Protocol):
 
     async def run_items(self, session_id: str, run_id: str) -> tuple[CodeItem, ...]: ...
 
+    async def get_item(self, session_id: str, item_id: str) -> CodeItem | None: ...
+
     async def get_prompt(
         self, session_id: str, prompt_id: str
     ) -> CodePrompt | None: ...
@@ -185,11 +187,13 @@ class CodeApplicationPort(Protocol):
 
     def storage_status(self) -> JsonObject: ...
 
-    def availability(self) -> tuple[bool, str | None]: ...
+    def availability(self, harness: str = "codex") -> tuple[bool, str | None]: ...
 
-    def catalog(self) -> CodeCatalog: ...
+    def catalog(self, harness: str = "codex") -> CodeCatalog: ...
 
-    async def create_session(self, session_id: str, cwd: str) -> CodeSession: ...
+    async def create_session(
+        self, session_id: str, cwd: str, harness: str = "codex"
+    ) -> CodeSession: ...
 
     async def list_sessions(
         self, cursor: tuple[int, str] | None = None, limit: int = 25, query: str = ""
@@ -217,7 +221,20 @@ class CodeApplicationPort(Protocol):
         text: str,
         *,
         expected_epoch: str,
+        attachment_ids: Sequence[str] = (),
     ) -> CodeRun: ...
+
+    async def send_message(
+        self,
+        session_id: str,
+        run_id: str,
+        operation_id: str,
+        text: str,
+        *,
+        expected_epoch: str,
+    ) -> JsonObject: ...
+
+    async def upload_attachment(self, session_id: str, upload) -> JsonObject: ...
 
     async def stop(self, session_id: str, operation_id: str) -> CodeRun: ...
 

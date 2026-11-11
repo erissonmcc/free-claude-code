@@ -17,6 +17,7 @@ from free_claude_code.application.code_sessions.models import CodeUnavailableErr
 from free_claude_code.runtime import sqlite_database
 from free_claude_code.runtime.code_sessions_sqlite import SQLiteCodeStore
 from free_claude_code.runtime.sqlite_database import initialize_database
+from free_claude_code.runtime.sqlite_migrations import MIGRATIONS
 
 
 @pytest.mark.asyncio
@@ -468,6 +469,97 @@ def snapshot(path: Path) -> dict[str, list[dict]]:
         }
 
 
+def _historical_v5_database(path):
+    historical_database(path, 3)
+    with closing(sqlite3.connect(path, autocommit=True)) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        for version, upgrade in sqlite_database.MIGRATIONS[3:5]:
+            connection.execute("BEGIN")
+            upgrade(connection)
+            connection.execute(f"PRAGMA user_version={version}")
+            connection.execute("COMMIT")
+
+
+def test_v5_upgrade_preserves_all_history_and_foreign_keys(tmp_path):
+    path = tmp_path / "fcc.db"
+    _historical_v5_database(path)
+    before = snapshot(path)
+    initialize_database(path)
+    after = snapshot(path)
+    for table, rows in before.items():
+        assert len(after[table]) == len(rows)
+        for old, new in zip(rows, after[table], strict=True):
+            assert {key: new[key] for key in old} == old
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        assert connection.execute("PRAGMA user_version").fetchone() == (MIGRATIONS[-1][0],)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        connection.execute("UPDATE code_sessions SET harness='claude' WHERE id='s'")
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("UPDATE code_sessions SET harness='invalid' WHERE id='s'")
+
+
+def test_v6_refuses_to_run_with_foreign_keys_enabled(tmp_path):
+    path = tmp_path / "fcc.db"
+    _historical_v5_database(path)
+    before = snapshot(path)
+    with closing(sqlite3.connect(path, autocommit=True)) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("BEGIN")
+        with pytest.raises(sqlite3.DatabaseError, match="foreign keys"):
+            sqlite_database.MIGRATIONS[5][1](connection)
+        connection.execute("ROLLBACK")
+    assert snapshot(path) == before
+
+
+def test_v6_failure_rolls_back_history_and_can_retry(tmp_path, monkeypatch):
+    path = tmp_path / "fcc.db"
+    _historical_v5_database(path)
+    before = snapshot(path)
+    migrations = sqlite_database.MIGRATIONS
+
+    def fail(connection):
+        migrations[5][1](connection)
+        raise sqlite3.DatabaseError("injected v6 failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            sqlite_database,
+            "MIGRATIONS",
+            tuple((version, fail if version == 6 else upgrade) for version, upgrade in migrations),
+        )
+        with pytest.raises(sqlite3.DatabaseError, match="injected v6"):
+            initialize_database(path)
+    assert snapshot(path) == before
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (5,)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    initialize_database(path)
+    after = snapshot(path)
+    for table, rows in before.items():
+        assert len(after[table]) == len(rows)
+        for old, new in zip(rows, after[table], strict=True):
+            assert {key: new[key] for key in old} == old
+
+
+def test_v6_rejects_existing_broken_foreign_keys_and_rolls_back(tmp_path):
+    path = tmp_path / "fcc.db"
+    _historical_v5_database(path)
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("UPDATE code_runs SET session_id='missing' WHERE id='r'")
+    before = snapshot(path)
+    with pytest.raises(sqlite3.DatabaseError, match="invalid record link"):
+        initialize_database(path)
+    assert snapshot(path) == before
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (5,)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall()
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
 @pytest.mark.parametrize("version", [0, 1, 2, 3])
 def test_historical_database_moves_and_upgrades_without_losing_records(
     tmp_path, version
@@ -487,7 +579,7 @@ def test_historical_database_moves_and_upgrades_without_losing_records(
         assert len(after["code_items"]) == 2
         assert after["code_items"][-1]["kind"] == "prompt"
         with closing(sqlite3.connect(target)) as connection:
-            assert connection.execute("PRAGMA user_version").fetchone() == (5,)
+            assert connection.execute("PRAGMA user_version").fetchone() == (MIGRATIONS[-1][0],)
             assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
             assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
@@ -524,7 +616,7 @@ def test_orphan_journals_are_not_treated_as_a_fresh_database(
     assert not (tmp_path / "fcc.db").exists()
 
 
-@pytest.mark.parametrize("version", [-1, 6])
+@pytest.mark.parametrize("version", [-1, MIGRATIONS[-1][0] + 1])
 def test_unsupported_version_is_not_moved_or_mutated(tmp_path, version):
     old, target = tmp_path / "code/code.db", tmp_path / "fcc.db"
     historical_database(old, 3)
@@ -590,6 +682,7 @@ def test_failed_rename_preserves_source_and_can_retry(tmp_path, monkeypatch):
     assert old.exists() and not target.exists()
     assert snapshot(old) == before
     initialize_database(target, old)
+    before["code_runs"][0]["consumed_tokens"] = None
     assert snapshot(target) == before
 
 
@@ -703,6 +796,7 @@ def test_messaging_schema_failure_rolls_back_without_changing_code_history(
             "SELECT name FROM sqlite_schema WHERE name LIKE 'messaging_%'"
         ).fetchall()
     initialize_database(target)
+    before["code_runs"][0]["consumed_tokens"] = None
     assert snapshot(target) == before
 
 

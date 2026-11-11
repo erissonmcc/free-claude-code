@@ -81,6 +81,7 @@ class MessagesHandler:
         generation_id: int | None = None,
         request_headers: Mapping[str, str] | None = None,
         model_info_lookup: ModelInfoLookup | None = None,
+        usage_recorder=None,
     ) -> None:
         self._settings = settings
         self._model_router = model_router or ModelRouter(settings)
@@ -92,6 +93,8 @@ class MessagesHandler:
             log_raw_payloads=settings.log_raw_api_payloads,
             request_headers=request_headers,
             model_info_lookup=model_info_lookup,
+            context_settings=settings,
+            usage_recorder=usage_recorder,
         )
         self._web_tools = WebToolService(
             settings=settings,

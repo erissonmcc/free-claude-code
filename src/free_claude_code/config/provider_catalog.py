@@ -396,6 +396,15 @@ PROVIDER_CATALOG: dict[str, ProviderDescriptor] = {
         default_base_url=GEMINI_DEFAULT_BASE,
         proxy_attr="gemini_proxy",
     ),
+    "gemini_oauth": ProviderDescriptor(
+        provider_id="gemini_oauth",
+        display_name="Google AI Studio (OAuth)",
+        website_url="https://aistudio.google.com/",
+        logo_filename="gemini-color.svg",
+        auth_kind=ProviderAuthKind.CONNECTED_ACCOUNT,
+        default_base_url=GEMINI_DEFAULT_BASE,
+        required_settings_attrs=("gemini_oauth_project_id",),
+    ),
     "vertex": ProviderDescriptor(
         provider_id="vertex",
         display_name="Google Vertex AI",

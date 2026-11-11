@@ -292,6 +292,9 @@ class SessionState:
         )
         return session, run, item
 
+    def next_sequence(self) -> int:
+        return self._sequence + 1
+
     def active_run(self, run_id: str) -> CodeRun | None:
         return self._run if self._run and self._run.id == run_id and self.busy else None
 

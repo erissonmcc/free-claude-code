@@ -37,6 +37,9 @@ def build_claude_proxy_env(
         base_env,
         proxy_root_url=proxy_root_url,
         remove_prefixes=("ANTHROPIC_",),
-        remove_keys=("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",),
+        remove_keys=(
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+            "CLAUDE_CODE_USE_VERTEX",
+        ),
         updates=claude_proxy_values(proxy_root_url, auth_token),
     )

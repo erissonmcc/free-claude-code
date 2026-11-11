@@ -140,6 +140,61 @@ def test_settings_defaults_are_valid_and_nonempty() -> None:
     ] == []
 
 
+def test_context_management_settings_have_safe_defaults_and_process_aliases() -> None:
+    defaults = Settings()
+    assert defaults.context_management_enabled is True
+    assert defaults.context_max_input_tokens is None
+    assert defaults.context_response_reserve_tokens == 8192
+    assert defaults.context_min_recent_messages == 6
+    assert defaults.context_max_tool_result_tokens == 20000
+    assert defaults.context_summary_target_tokens == 2048
+    assert defaults.context_max_compaction_passes == 3
+    assert defaults.context_growth_limit_percent == 25
+
+    configured = compose_settings_snapshot(
+        {},
+        {
+            "FCC_CONTEXT_MANAGEMENT_ENABLED": "false",
+            "FCC_CONTEXT_MAX_INPUT_TOKENS": "120000",
+            "FCC_CONTEXT_RESPONSE_RESERVE_TOKENS": "4096",
+            "FCC_CONTEXT_MIN_RECENT_MESSAGES": "8",
+            "FCC_CONTEXT_MAX_TOOL_RESULT_TOKENS": "24000",
+            "FCC_CONTEXT_SUMMARY_TARGET_TOKENS": "3000",
+            "FCC_CONTEXT_MAX_COMPACTION_PASSES": "4",
+            "FCC_CONTEXT_GROWTH_LIMIT_PERCENT": "30",
+        },
+    )
+    settings = configured.settings
+    assert settings.context_management_enabled is False
+    assert settings.context_max_input_tokens == 120000
+    assert settings.context_response_reserve_tokens == 4096
+    assert settings.context_min_recent_messages == 8
+    assert settings.context_max_tool_result_tokens == 24000
+    assert settings.context_summary_target_tokens == 3000
+    assert settings.context_max_compaction_passes == 4
+    assert settings.context_growth_limit_percent == 30
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("context_max_input_tokens", 0),
+        ("context_response_reserve_tokens", 0),
+        ("context_min_recent_messages", 0),
+        ("context_max_tool_result_tokens", -1),
+        ("context_summary_target_tokens", 0),
+        ("context_max_compaction_passes", 0),
+        ("context_growth_limit_percent", -1),
+        ("context_growth_limit_percent", 101),
+    ],
+)
+def test_context_management_settings_reject_invalid_limits(
+    field: str, value: int
+) -> None:
+    with pytest.raises(ValidationError):
+        Settings(**{field: value})
+
+
 def test_every_external_setting_has_one_explicit_alias() -> None:
     aliases = [
         field.validation_alias

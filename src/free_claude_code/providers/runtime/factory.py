@@ -2,6 +2,7 @@
 
 import importlib
 from collections.abc import Callable, Mapping
+from dataclasses import asdict
 
 from free_claude_code.application.errors import (
     ApplicationUnavailableError,
@@ -178,7 +179,7 @@ def _load_gemini() -> ProviderFactory:
     return construct
 
 
-def _load_vertex() -> ProviderFactory:
+def _load_vertex(*, cache_store=None, token_usage_store=None) -> ProviderFactory:
     from free_claude_code.providers.vertex import VertexProvider
 
     def construct(
@@ -186,11 +187,47 @@ def _load_vertex() -> ProviderFactory:
         settings: Settings,
         admission: ProviderAdmissionController,
     ) -> BaseProvider:
+        readiness = None
+        if cache_store is not None and token_usage_store is not None:
+            async def readiness(
+                model: str, endpoint_key: str, prefix_key: str, _prefix_tokens: int
+            ) -> bool:
+                from free_claude_code.application.google_cache_baseline import (
+                    evaluate_cache_baseline,
+                )
+
+                snapshot = await token_usage_store.query(provider="vertex", limit=1000)
+                records = [
+                    asdict(record)
+                    for record in snapshot.cache_observations
+                    if record.provider == "vertex"
+                    and record.model == model
+                    and record.cache_endpoint_key == endpoint_key
+                ]
+                matching_prefix = [
+                    row for row in records if row.get("cache_prefix_key") == prefix_key
+                    and row.get("actual_input_tokens") is not None
+                    and row.get("cached_input_tokens") is not None
+                ]
+                if len(matching_prefix) < 2:
+                    return False
+                baseline = evaluate_cache_baseline(
+                    records, settings.google_cache_prices
+                )
+                return any(
+                    item.get("baseline_ready") is True
+                    and item.get("status") == "projection_favorable"
+                    for item in baseline
+                )
+
         return VertexProvider(
             config,
             project_id=_required_setting(settings, "vertex_project_id"),
             location=settings.vertex_location,
             admission=admission,
+            cache_store=cache_store,
+            cache_readiness=readiness,
+            cache_prices=settings.google_cache_prices,
         )
 
     return construct
@@ -252,7 +289,7 @@ _SPECIAL_PROVIDER_FACTORIES: dict[str, Callable[[], ProviderFactory]] = {
     "opencode_zen": _load_opencode_zen,
     "opencode_go": _load_opencode_go,
 }
-_INJECTED_PROVIDER_IDS = {"openai", "github_copilot"}
+_INJECTED_PROVIDER_IDS = {"openai", "github_copilot", "gemini_oauth"}
 
 
 def _required_setting(settings: Settings, attr_name: str) -> str:

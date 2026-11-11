@@ -33,6 +33,7 @@ from copilot.session import PermissionInvocation
 
 from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.core.model_capabilities import ModelInputModality
+from free_claude_code.core.reasoning import ReasoningCapability
 from free_claude_code.providers.anthropic_messages.request_policy import (
     MessagesModelCapabilities,
 )
@@ -76,6 +77,18 @@ async def _delete_session_record(
             raise
 
 
+
+class _DirectSdkSession:
+    def __init__(self, endpoint: CopilotEndpoint) -> None:
+        self._endpoint = endpoint
+
+    async def endpoint(self) -> CopilotEndpoint:
+        return self._endpoint
+
+    async def close(self) -> None:
+        return None
+
+
 class SdkRuntime:
     """Own a hidden official runtime with native authentication and inert sessions."""
 
@@ -84,6 +97,12 @@ class SdkRuntime:
         self._directory: tempfile.TemporaryDirectory[str] | None = None
         self._sessions: list[SdkSession] = []
         self._pending_session_ids: set[str] = set()
+        self._direct_copilot_token: str | None = None
+        self._direct_copilot_expiry: float = 0.0
+        self._direct_api_url: str = "https://api.githubcopilot.com"
+        self._direct_models: dict[str, CopilotModel] = {}
+        self._direct_routes: dict[str, CopilotEgress] = {}
+        self._direct_models_loaded_at: float = 0.0
         self._lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
         self._closing = False
@@ -96,6 +115,10 @@ class SdkRuntime:
             if self._client is not None:
                 return
             env = profile_environment()
+            token_path = Path.home() / ".copilot-termux" / "oauth-token"
+            copilot_token = token_path.read_text().strip() if token_path.is_file() else ""
+            if copilot_token:
+                env["COPILOT_GITHUB_TOKEN"] = copilot_token
             path = await verified_cli_path(env)
             env["COPILOT_ALLOW_GET_PROVIDER_ENDPOINT"] = "true"
             directory = tempfile.TemporaryDirectory(prefix="fcc-copilot-")
@@ -106,6 +129,7 @@ class SdkRuntime:
                         path=path, args=("--disable-builtin-mcps",)
                     ),
                     env=env,
+                    github_token=copilot_token or None,
                     working_directory=directory.name,
                     use_logged_in_user=True,
                     mode="copilot-cli",
@@ -129,6 +153,214 @@ class SdkRuntime:
             raise CopilotUnavailable("Copilot runtime is not connected.")
         return self._client
 
+
+    def _direct_token(self) -> str:
+        token_path = Path.home() / ".copilot-termux" / "oauth-token"
+        token = token_path.read_text(encoding="utf-8").strip() if token_path.is_file() else ""
+        if not token:
+            raise CopilotUnavailable("Copilot OAuth token is missing. Reconnect Copilot in Admin.")
+        return token
+
+    async def _direct_refresh(self, *, force: bool = False) -> None:
+        import time
+
+        now = time.time()
+        if (
+            not force
+            and self._direct_models
+            and self._direct_copilot_token
+            and self._direct_models_loaded_at > now - 60
+            and self._direct_copilot_expiry > now + 60
+        ):
+            return
+
+        github_token = self._direct_token()
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"token {github_token}",
+            "User-Agent": f"copilot/{COPILOT_CLI_VERSION}",
+            "Copilot-Integration-Id": "copilot-developer-cli",
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            exchange = await client.get(
+                "https://api.github.com/copilot_internal/v2/token",
+                headers=headers,
+            )
+            if not exchange.is_success:
+                raise CopilotUnavailable(
+                    f"Copilot token exchange failed (HTTP {exchange.status_code}). Reconnect Copilot in Admin."
+                )
+            payload = exchange.json()
+            copilot_token = payload.get("token")
+            if not isinstance(copilot_token, str) or not copilot_token:
+                raise CopilotUnavailable("GitHub did not return a Copilot API token. Reconnect Copilot in Admin.")
+            endpoints = payload.get("endpoints")
+            api_url = endpoints.get("api") if isinstance(endpoints, dict) else None
+            if not isinstance(api_url, str) or not api_url:
+                api_url = "https://api.githubcopilot.com"
+            api_url = api_url.rstrip("/")
+            expiry = payload.get("expires_at")
+            try:
+                expiry_value = float(expiry)
+            except (TypeError, ValueError):
+                expiry_value = now + 1500
+
+            api_headers = {
+                "Accept": "application/json",
+                "Authorization": f"Bearer {copilot_token}",
+                "User-Agent": f"copilot/{COPILOT_CLI_VERSION}",
+                "Editor-Version": f"copilot/{COPILOT_CLI_VERSION}",
+                "Copilot-Integration-Id": "copilot-developer-cli",
+                "X-GitHub-Api-Version": "2026-08-01",
+            }
+            models_response = await client.get(f"{api_url}/models", headers=api_headers)
+            if not models_response.is_success:
+                raise CopilotUnavailable(
+                    f"Copilot model discovery failed (HTTP {models_response.status_code}). Check the selected account and its model policies."
+                )
+            body = models_response.json()
+            items = body.get("data", body.get("models", [])) if isinstance(body, dict) else []
+            if not isinstance(items, list):
+                items = []
+
+            models: dict[str, CopilotModel] = {}
+            routes: dict[str, CopilotEgress] = {}
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                model_id = item.get("id")
+                if not isinstance(model_id, str) or not model_id.strip():
+                    continue
+                policy = item.get("policy")
+                if isinstance(policy, dict) and policy.get("state") not in (None, "enabled"):
+                    continue
+                caps = item.get("capabilities") if isinstance(item.get("capabilities"), dict) else {}
+                limits = caps.get("limits") if isinstance(caps.get("limits"), dict) else {}
+                supports = caps.get("supports") if isinstance(caps.get("supports"), dict) else {}
+                supported_endpoints = item.get("supported_endpoints")
+                endpoints_set = {
+                    str(x).strip()
+                    for x in supported_endpoints
+                    if isinstance(x, str)
+                } if isinstance(supported_endpoints, list) else set()
+
+                if "/v1/messages" in endpoints_set and "/chat/completions" not in endpoints_set:
+                    egress = CopilotEgress.MESSAGES
+                elif "/responses" in endpoints_set and "/chat/completions" not in endpoints_set:
+                    egress = CopilotEgress.RESPONSES
+                elif "/v1/messages" in endpoints_set and model_id.lower().startswith("claude-"):
+                    egress = CopilotEgress.MESSAGES
+                elif (
+                    "/responses" in endpoints_set
+                    and model_id.lower().startswith(("gpt-5", "gpt-6"))
+                    and not model_id.lower().startswith("gpt-5-mini")
+                ):
+                    egress = CopilotEgress.RESPONSES
+                else:
+                    egress = CopilotEgress.CHAT
+
+                efforts_raw = supports.get("reasoning_effort")
+                efforts = (
+                    tuple(str(x).strip() for x in efforts_raw if isinstance(x, str) and x.strip())
+                    if isinstance(efforts_raw, list)
+                    else None
+                )
+                adaptive_raw = supports.get("adaptive_thinking")
+                adaptive = adaptive_raw if adaptive_raw in {"unsupported", "optional", "required"} else None
+                max_output = limits.get("max_output_tokens")
+                max_output = max_output if isinstance(max_output, int) and max_output > 0 else None
+                context_window = limits.get("max_context_window_tokens")
+                context_window = context_window if isinstance(context_window, int) and context_window > 0 else None
+
+                reasoning_capability = (
+                    ReasoningCapability.REQUIRED
+                    if adaptive == "required"
+                    else ReasoningCapability.OPTIONAL
+                    if adaptive == "optional" or efforts
+                    else ReasoningCapability.NONE
+                    if adaptive == "unsupported"
+                    else ReasoningCapability.UNKNOWN
+                )
+                info = ProviderModelInfo(
+                    model_id=model_id,
+                    supports_thinking=adaptive not in (None, "unsupported"),
+                    context_window_tokens=context_window,
+                    max_output_tokens=max_output,
+                    reasoning_capability=reasoning_capability,
+                )
+                messages = MessagesModelCapabilities(
+                    max_output_tokens=max_output,
+                    adaptive_thinking=adaptive,
+                    supports_output_effort=bool(efforts),
+                    supported_efforts=efforts,
+                    supports_vision=supports.get("vision") if isinstance(supports.get("vision"), bool) else None,
+                )
+                models[model_id] = CopilotModel(
+                    info=info,
+                    messages=messages,
+                    supported_efforts=efforts,
+                    default_effort=efforts[-1] if efforts else None,
+                )
+                routes[model_id] = egress
+
+            if not models:
+                raise CopilotUnavailable(
+                    "This GitHub account exposes no enabled Copilot models. Check its subscription and model policies."
+                )
+
+            self._direct_copilot_token = copilot_token
+            self._direct_copilot_expiry = expiry_value
+            self._direct_api_url = api_url
+            self._direct_models = models
+            self._direct_routes = routes
+            self._direct_models_loaded_at = now
+
+    async def _direct_identity(self) -> CopilotIdentity:
+        token = self._direct_token()
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                "https://api.github.com/user",
+                headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {token}",
+                    "User-Agent": "Free-Claude-Code",
+                },
+            )
+        if not response.is_success:
+            raise CopilotUnavailable("GitHub OAuth token is invalid or expired. Reconnect Copilot in Admin.")
+        profile = response.json()
+        login = profile.get("login") if isinstance(profile, dict) else None
+        if not isinstance(login, str) or not login:
+            raise CopilotUnavailable("GitHub did not return a valid account profile. Reconnect Copilot in Admin.")
+        return CopilotIdentity("github.com", login)
+
+    async def _direct_endpoint(self, model_id: str) -> CopilotEndpoint:
+        await self._direct_refresh()
+        model = self._direct_models.get(model_id)
+        if model is None:
+            raise CopilotUnavailable("This model is not available from the connected Copilot account. Refresh the model list.")
+        token = self._direct_copilot_token
+        if not token:
+            raise CopilotUnavailable("Copilot API credentials are unavailable. Reconnect Copilot in Admin.")
+        route = self._direct_routes.get(model_id, CopilotEgress.CHAT)
+        return CopilotEndpoint(
+            egress=route,
+            http=HttpEndpoint(
+                base_url=self._direct_api_url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "User-Agent": f"copilot/{COPILOT_CLI_VERSION}",
+                    "Editor-Version": f"copilot/{COPILOT_CLI_VERSION}",
+                    "Copilot-Integration-Id": "copilot-developer-cli",
+                    "X-GitHub-Api-Version": "2026-08-01",
+                },
+                api_key=token,
+            ),
+                expires_at=self._direct_copilot_expiry,
+        )
+
     async def identity(self) -> CopilotIdentity | None:
         try:
             async with asyncio.timeout(SDK_RPC_TIMEOUT):
@@ -138,11 +370,28 @@ class SdkRuntime:
                 "Could not read Copilot profile status. Reconnect Copilot."
             ) from None
         if not status.isAuthenticated:
+            return await self._direct_identity()
+            token_path = Path.home() / ".copilot-termux" / "oauth-token"
+            token = token_path.read_text().strip() if token_path.is_file() else ""
+            if token:
+                try:
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        response = await client.get(
+                            "https://api.github.com/user",
+                            headers={
+                                "Accept": "application/vnd.github+json",
+                                "Authorization": f"Bearer {token}",
+                                "User-Agent": "Free-Claude-Code",
+                            },
+                        )
+                    if response.is_success:
+                        profile = response.json()
+                        login = profile.get("login") if isinstance(profile, dict) else None
+                        if isinstance(login, str) and login:
+                            return CopilotIdentity("github.com", login)
+                except Exception:
+                    pass
             return None
-        if status.authType not in {"user", "gh-cli"}:
-            raise CopilotUnavailable(
-                "Copilot must use an existing GitHub profile. Sign in with copilot login --device-code."
-            )
         if not status.login or not status.host:
             raise CopilotUnavailable(
                 "Copilot did not report the selected GitHub profile."
@@ -170,9 +419,8 @@ class SdkRuntime:
                 )
             )
         except Exception:
-            raise CopilotUnavailable(
-                "Could not discover Copilot subscription models. Check the selected account and its model policies."
-            ) from None
+            await self._direct_refresh(force=True)
+            return tuple(self._direct_models.values())
 
     async def session(self, model_id: str) -> SdkSession:
         client = self._running()
@@ -211,9 +459,16 @@ class SdkRuntime:
                     capi=CapiSessionOptions(enable_web_socket_responses=False),
                 )
         except Exception:
-            raise CopilotUnavailable(
-                "Could not open a Copilot endpoint session. Reconnect Copilot."
-            ) from None
+            try:
+                await self._direct_refresh(force=True)
+                endpoint = await self._direct_endpoint(model_id)
+                return _DirectSdkSession(endpoint)
+            except CopilotUnavailable:
+                raise
+            except Exception:
+                raise CopilotUnavailable(
+                    "Could not open a Copilot endpoint session. Reconnect Copilot."
+                ) from None
         owned = SdkSession(client, session, model_id, session_id)
         self._sessions.append(owned)
         self._pending_session_ids.discard(session_id)

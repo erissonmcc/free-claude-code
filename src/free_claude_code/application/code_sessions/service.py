@@ -17,10 +17,12 @@ from free_claude_code.application.session_events import (
 )
 from free_claude_code.core.json_types import JsonObject, JsonValue
 
+from .attachments import SessionAttachments
 from .models import (
     CodeCatalog,
     CodeConflictError,
     CodeDetail,
+    CodeItem,
     CodeNotFoundError,
     CodePage,
     CodePrompt,
@@ -78,9 +80,18 @@ class _SessionRuntime:
 
 
 class CodeService:
-    def __init__(self, store: CodeStore, harness: HarnessFactory) -> None:
+    def __init__(
+        self,
+        store: CodeStore,
+        harness: HarnessFactory | dict[str, HarnessFactory],
+        *,
+        default_harness: str = "codex",
+        attachments: SessionAttachments | None = None,
+    ) -> None:
         self._store = store
-        self._harness = harness
+        self._attachments = attachments or SessionAttachments()
+        self._harnesses = harness if isinstance(harness, dict) else {default_harness: harness}
+        self._default_harness = default_harness
         self._owners: dict[str, _SessionRuntime] = {}
         self._gates: dict[str, _SessionGate] = {}
         self._version = 0
@@ -144,13 +155,19 @@ class CodeService:
             owner.finished = asyncio.Event()
             owner.job = self._job(self._delete_native(owner, reconcile=True))
 
-    def availability(self) -> tuple[bool, str | None]:
+    def _factory(self, harness: str) -> HarnessFactory:
+        try:
+            return self._harnesses[harness]
+        except KeyError:
+            raise CodeValidationError("Choose a supported coding agent.") from None
+
+    def availability(self, harness: str = "codex") -> tuple[bool, str | None]:
         if not self._accepting:
             return False, self._message
-        return self._harness.availability()
+        return self._factory(harness).availability()
 
-    def catalog(self) -> CodeCatalog:
-        return self._harness.catalog()
+    def catalog(self, harness: str = "codex") -> CodeCatalog:
+        return self._factory(harness).catalog()
 
     def begin_shutdown(self) -> None:
         self._stopping = True
@@ -238,6 +255,12 @@ class CodeService:
         if not self._accepting:
             raise CodeUnavailableError(self._message or "Code sessions is unavailable.")
 
+    def _require_available_for(self, harness: str) -> None:
+        self._require_available()
+        available, message = self._factory(harness).availability()
+        if not available:
+            raise CodeUnavailableError(message or f"{harness} is unavailable.")
+
     def _gate(self, session_id: str) -> _SessionGate:
         if session_id not in self._gates:
             self._gates[session_id] = _SessionGate(
@@ -284,12 +307,16 @@ class CodeService:
             raise CodeNotFoundError("Code session was deleted.")
         return owner
 
-    async def create_session(self, session_id: str, cwd: str) -> CodeSession:
-        return await self._command(self._create(session_id, cwd))
+    async def create_session(
+        self, session_id: str, cwd: str, harness: str | None = None
+    ) -> CodeSession:
+        return await self._command(
+            self._create(session_id, cwd, harness or self._default_harness)
+        )
 
-    async def _create(self, session_id: str, cwd: str) -> CodeSession:
+    async def _create(self, session_id: str, cwd: str, harness: str) -> CodeSession:
         await self._wait_for_store()
-        self._require_available()
+        self._require_available_for(harness)
         _validate_id(session_id)
         try:
             folder = Path(cwd).expanduser().resolve(strict=True)
@@ -299,9 +326,13 @@ class CodeService:
             raise CodeValidationError(
                 "Choose an existing folder on the FCC computer."
             ) from None
+        catalog = self.catalog(harness)
         session = await self._store.create(
             CodeSession(
-                id=session_id, cwd=str(folder), model=self.catalog().default_model
+                id=session_id,
+                cwd=str(folder),
+                model=catalog.default_model,
+                harness=harness,
             )
         )
         owner = await self._owner(session.id)
@@ -390,7 +421,7 @@ class CodeService:
             self._editable(owner, revision)
             updates = owner.state.settings_updates(changes)
             catalog = (
-                self.catalog()
+                self.catalog(owner.state.session.harness)
                 if changes.keys() & {"model", "reasoning_effort"}
                 else None
             )
@@ -409,10 +440,29 @@ class CodeService:
         text: str,
         *,
         expected_epoch: str,
+        attachment_ids: Sequence[str] = (),
     ) -> CodeRun:
         return await self._command(
-            self._send(session_id, operation_id, revision, text, expected_epoch)
+            self._send(
+                session_id,
+                operation_id,
+                revision,
+                text,
+                expected_epoch,
+                attachment_ids,
+            )
         )
+
+    async def upload_attachment(
+        self, session_id: str, upload
+    ) -> dict[str, str | int]:
+        owner = await self._owner(session_id)
+        async with self._locked(owner):
+            if owner.state.session.status != "ready":
+                raise CodeConflictError(
+                    "Attachments cannot be added while deleting a session."
+                )
+            return await self._attachments.save(session_id, upload)
 
     async def _send(
         self,
@@ -421,8 +471,16 @@ class CodeService:
         revision: int,
         text: str,
         expected_epoch: str,
+        attachment_ids: Sequence[str] = (),
     ) -> CodeRun:
+        _validate_id(session_id)
         _validate_id(operation_id)
+        user_text = text
+        paths = await self._attachments.resolve(session_id, list(attachment_ids))
+        if paths:
+            text = f"{text.rstrip()}\n\nAttachments:\n" + "\n".join(
+                str(path) for path in paths
+            )
         if not text.strip() or len(text) > 1_000_000:
             raise CodeValidationError(
                 "Enter a message of at most 1,000,000 characters."
@@ -440,7 +498,7 @@ class CodeService:
             self._editable(owner, revision)
             owner.state.check_can_send()
             selected = owner.state.session
-        selection = await self._harness.prepare(
+        selection = await self._factory(selected.harness).prepare(
             selected.model, selected.reasoning_effort, selected.mode
         )
         async with self._locked(owner):
@@ -456,17 +514,103 @@ class CodeService:
             owner.state.check_can_send()
             session, run, item = owner.state.prepare_admission(
                 operation_id,
-                text,
+                user_text,
                 selection.model,
                 selection.reasoning_effort,
                 selection.mode,
             )
+            run = run.model_copy(update={"text": text})
             session, run = await self._store.admit_run(session, run, item, revision)
             owner.state.accept_admission(session, run, item)
             owner.finished = asyncio.Event()
             self._publish(owner, "run.updated", items=[item.model_dump(mode="json")])
             owner.job = self._job(self._work(owner, run.id, selection))
             return run
+
+    async def send_message(
+        self,
+        session_id: str,
+        run_id: str,
+        operation_id: str,
+        text: str,
+        *,
+        expected_epoch: str,
+    ) -> JsonObject:
+        return await self._command(
+            self._send_message(session_id, run_id, operation_id, text, expected_epoch)
+        )
+
+    async def _send_message(
+        self, session_id: str, run_id: str, operation_id: str, text: str, expected_epoch: str
+    ) -> JsonObject:
+        _validate_id(run_id)
+        _validate_id(operation_id)
+        if not text.strip() or len(text) > 1_000_000:
+            raise CodeValidationError("Enter a message of at most 1,000,000 characters.")
+        owner = await self._owner(session_id)
+        async with self._locked(owner):
+            previous = await self._store.get_item(session_id, operation_id)
+            if previous is not None:
+                if (
+                    previous.raw.get("fcc_message_receipt") is not True
+                    or previous.run_id != run_id
+                    or previous.text != text
+                ):
+                    raise CodeConflictError(
+                        "This message ID was already used for different work."
+                    )
+                return {
+                    "operation_id": operation_id,
+                    "run_id": run_id,
+                    "status": previous.detail,
+                }
+            self._require_available()
+            self._check_owner(owner)
+            run, connection = owner.state.run, owner.connection
+            send_message = getattr(connection, "send_message", None)
+            if (
+                expected_epoch != self.epoch
+                or owner.state.session.harness != "claude"
+                or owner.state.session.status != "ready"
+                or run is None
+                or run.id != run_id
+                or run.status != "running"
+                or not run.native_turn_id
+                or not callable(send_message)
+            ):
+                raise CodeConflictError("This run cannot accept a message.")
+            await self._flush_locked(owner)
+            item = CodeItem(
+                id=operation_id,
+                session_id=session_id,
+                run_id=run_id,
+                sequence=owner.state.next_sequence(),
+                kind="user",
+                text=text,
+                detail="uncertain",
+                complete=True,
+                raw={"fcc_message_receipt": True},
+            )
+            await self._commit_progress(
+                owner, SessionProgress(owner.state.session, items=(item,))
+            )
+            self._publish(owner, "item.updated", item=item.model_dump(mode="json"))
+        try:
+            await send_message(operation_id, text)
+        except Exception:
+            pass
+        else:
+            async with self._locked(owner):
+                current = owner.state.run
+                if (not owner.deleted and not owner.storage_failed and owner.connection is connection
+                        and current is not None and current.id == run_id
+                        and current.status == "running" and not current.stop_requested):
+                    item = item.model_copy(update={"detail": "forwarded"})
+                    await self._commit_progress(
+                        owner, SessionProgress(owner.state.session, items=(item,))
+                    )
+                    self._publish(owner, "item.updated", item=item.model_dump(mode="json"))
+        return {"operation_id": operation_id, "run_id": run_id, "status": item.detail}
 
     async def stop(self, session_id: str, operation_id: str) -> CodeRun:
         return await self._command(self._stop(session_id, operation_id))
@@ -536,6 +680,7 @@ class CodeService:
     async def _delete(self, session_id: str, revision: int) -> CodeSession | None:
         self._require_available()
         if await self._store.is_deleted(session_id):
+            await self._attachments.delete_session(session_id)
             return None
         owner = await self._owner(session_id)
         async with self._locked(owner):
@@ -780,7 +925,12 @@ class CodeService:
                         owner.state.session.id, event.turn_id
                     )
                 matches = owner.state.matches_turn(event, known_turn=known_turn)
-                if (
+                if event.kind == "run_usage" and matches and run is not None and event.consumed_tokens is not None:
+                    await self._commit_progress(owner, SessionProgress(
+                        owner.state.session, run=run.model_copy(update={"consumed_tokens": event.consumed_tokens})
+                    ))
+                    self._publish(owner, "run.updated")
+                elif (
                     event.kind in {"turn_started", "turn_completed"}
                     and matches
                     and run is not None
@@ -1086,7 +1236,7 @@ class CodeService:
             if thread_id is not None:
                 connection = owner.connection
                 if connection is None:
-                    connection = await self._harness.open_history(
+                    connection = await self._factory(owner.state.session.harness).open_history(
                         owner.state.session.cwd, lambda event: self._event(owner, event)
                     )
                     owner.connection, owner.generation = (
@@ -1106,6 +1256,12 @@ class CodeService:
             await self._close_connection(owner)
             async with self._locked(owner):
                 await self._store.delete(owner.state.session.id)
+                try:
+                    await self._attachments.delete_session(owner.state.session.id)
+                except Exception:
+                    logger.bind(session_id=owner.state.session.id).exception(
+                        "Session was deleted but attachment cleanup failed; retry deletion to clean up."
+                    )
                 owner.deleted = True
                 owner.state.discard_deleted_history()
                 self._publish(owner, "session.deleted")

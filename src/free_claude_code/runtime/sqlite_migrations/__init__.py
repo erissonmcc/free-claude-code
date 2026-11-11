@@ -14,6 +14,12 @@ from . import (
     v0003_code_context_usage,
     v0004_messaging_schema,
     v0005_active_code_prompts,
+    v0006_claude_harness,
+    v0007_run_usage,
+    v0008_token_usage,
+    v0009_cache_baseline,
+    v0010_cache_endpoint_scope,
+    v0011_vertex_cached_contents,
 )
 
 MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
@@ -22,4 +28,10 @@ MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
     (3, v0003_code_context_usage.upgrade),
     (4, v0004_messaging_schema.upgrade),
     (5, v0005_active_code_prompts.upgrade),
+    (6, v0006_claude_harness.upgrade),
+    (7, v0007_run_usage.upgrade),
+    (8, v0008_token_usage.upgrade),
+    (9, v0009_cache_baseline.upgrade),
+    (10, v0010_cache_endpoint_scope.upgrade),
+    (11, v0011_vertex_cached_contents.upgrade),
 )

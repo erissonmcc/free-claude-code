@@ -16,6 +16,7 @@ from free_claude_code.application.errors import (
 from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.config.provider_catalog import VERTEX_AI_API_ROOT
 from free_claude_code.core.failures import ExecutionFailure, FailureKind
+from free_claude_code.core.model_capabilities import ModelInputModality
 from free_claude_code.core.reasoning import ReasoningEffort, ReasoningPolicy
 from free_claude_code.providers.model_listing import ModelListResponseError
 from free_claude_code.providers.vertex import VertexProvider
@@ -421,8 +422,18 @@ async def test_vertex_model_discovery_follows_native_pagination() -> None:
 
     assert model_infos == frozenset(
         {
-            ProviderModelInfo("google/gemini-3.5-flash"),
-            ProviderModelInfo("google/gemini-3.1-pro"),
+            ProviderModelInfo(
+                "google/gemini-3.5-flash",
+                input_modalities=frozenset(
+                    {ModelInputModality.TEXT, ModelInputModality.IMAGE}
+                ),
+            ),
+            ProviderModelInfo(
+                "google/gemini-3.1-pro",
+                input_modalities=frozenset(
+                    {ModelInputModality.TEXT, ModelInputModality.IMAGE}
+                ),
+            ),
         }
     )
     assert get.await_args_list[0].kwargs == {

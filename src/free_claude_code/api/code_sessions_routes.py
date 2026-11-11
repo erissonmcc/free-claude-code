@@ -8,6 +8,8 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.datastructures import UploadFile
+from starlette.formparsers import MultiPartException, MultiPartParser
 
 from free_claude_code.application.code_sessions import (
     CodeApplicationPort,
@@ -18,6 +20,10 @@ from free_claude_code.application.code_sessions import (
     CodeSession,
     CodeUnavailableError,
     CodeValidationError,
+)
+from free_claude_code.application.code_sessions.attachments import (
+    AttachmentSizeError,
+    MAX_FILE_SIZE,
 )
 from free_claude_code.application.code_sessions.models import CodeMode
 from free_claude_code.application.errors import ApplicationUnavailableError
@@ -41,7 +47,7 @@ class CommandPayload(BaseModel):
 class CreatePayload(CommandPayload):
     session_id: str
     cwd: str = Field(min_length=1, max_length=4096)
-    harness: Literal["codex"] = "codex"
+    harness: Literal["codex", "claude"] = "codex"
 
 
 class FolderPickerPayload(CommandPayload):
@@ -61,6 +67,13 @@ class SendPayload(CommandPayload):
     expected_revision: int = Field(gt=0)
     expected_epoch: str
     text: str = Field(min_length=1, max_length=1_000_000)
+    attachment_ids: list[str] = Field(default_factory=list, max_length=5)
+
+
+class MessagePayload(CommandPayload):
+    operation_id: str
+    text: str = Field(min_length=1, max_length=1_000_000)
+    expected_epoch: str
 
 
 class StopPayload(CommandPayload):
@@ -85,16 +98,25 @@ def code_page(request: Request, session_id: str | None = None):
 
 
 @router.get("/admin/api/code/bootstrap")
-async def bootstrap(services: ApiServices = Depends(get_services)) -> JsonObject:
+async def bootstrap(
+    harness: Literal["codex", "claude"] = "codex",
+    services: ApiServices = Depends(get_services),
+) -> JsonObject:
     code = _code(services)
-    available, message = code.availability()
-    catalog = code.catalog()
+    available, message = (
+        code.availability() if harness == "codex" else code.availability(harness)
+    )
+    catalog = code.catalog() if harness == "codex" else code.catalog(harness)
     return {
         "available": available,
         "message": message,
         "storage": code.storage_status(),
         "startup": services.requests.catalog_status(),
-        "harnesses": [{"id": "codex", "name": "Codex"}],
+        "harnesses": [
+            {"id": "codex", "name": "Codex"},
+            {"id": "claude", "name": "Claude Code"},
+        ],
+        "harness": harness,
         "epoch": code.epoch,
         "models": [model.model_dump(mode="json") for model in catalog.models],
         "default_model": catalog.default_model,
@@ -171,6 +193,10 @@ async def create(
 ) -> JsonObject:
     return _session_payload(
         await _code(services).create_session(payload.session_id, payload.cwd)
+        if payload.harness == "codex"
+        else await _code(services).create_session(
+            payload.session_id, payload.cwd, payload.harness
+        )
     )
 
 
@@ -225,6 +251,38 @@ async def delete(
     }
 
 
+@router.post("/admin/api/code/sessions/{session_id}/attachments", status_code=201)
+async def upload_attachment(
+    session_id: str,
+    request: Request,
+    services: ApiServices = Depends(get_services),
+) -> JsonObject:
+    if not request.headers.get("content-type", "").lower().startswith("multipart/form-data"):
+        raise HTTPException(status_code=400, detail="Expected multipart form data.")
+
+    async def limited_stream() -> AsyncIterator[bytes]:
+        size = 0
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > MAX_FILE_SIZE + 128 * 1024:
+                raise AttachmentSizeError("The attachment exceeds its size limit.")
+            yield chunk
+
+    try:
+        form = await MultiPartParser(request.headers, limited_stream(), max_files=1, max_fields=0).parse()
+        try:
+            file = form.get("file")
+            if not isinstance(file, UploadFile):
+                raise HTTPException(status_code=422, detail="A file is required.")
+            return await _code(services).upload_attachment(session_id, file)
+        finally:
+            await form.close()
+    except AttachmentSizeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except MultiPartException as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/admin/api/code/sessions/{session_id}/turns", status_code=202)
 async def send(
     session_id: str, payload: SendPayload, services: ApiServices = Depends(get_services)
@@ -236,7 +294,24 @@ async def send(
             payload.expected_revision,
             payload.text,
             expected_epoch=payload.expected_epoch,
+            attachment_ids=payload.attachment_ids,
         )
+    )
+
+
+@router.post("/admin/api/code/sessions/{session_id}/runs/{run_id}/messages")
+async def send_message(
+    session_id: str,
+    run_id: str,
+    payload: MessagePayload,
+    services: ApiServices = Depends(get_services),
+) -> JsonObject:
+    return await _code(services).send_message(
+        session_id,
+        run_id,
+        payload.operation_id,
+        payload.text,
+        expected_epoch=payload.expected_epoch,
     )
 
 

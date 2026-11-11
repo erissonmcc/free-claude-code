@@ -30,13 +30,20 @@ _PROFILE = OpenAIChatProfile(
 
 
 class GeminiProvider(GoogleOpenAIProvider):
-    """Gemini API using ``https://generativelanguage.googleapis.com/v1beta/openai/``."""
+    """Gemini API using the Google OpenAI-compatible endpoint."""
 
     def __init__(
-        self, config: ProviderConfig, *, admission: ProviderAdmissionController
+        self,
+        config: ProviderConfig,
+        *,
+        admission: ProviderAdmissionController,
+        api_key_provider=None,
+        default_headers=None,
     ):
         super().__init__(
             config,
             profile=_PROFILE,
             admission=admission,
+            api_key_provider=api_key_provider,
+            default_headers=default_headers,
         )

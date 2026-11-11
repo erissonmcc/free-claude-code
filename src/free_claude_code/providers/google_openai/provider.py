@@ -63,6 +63,8 @@ class GoogleOpenAIProvider(OpenAIChatProvider):
         admission: ProviderAdmissionController,
         api_key_provider: OpenAIAsyncCredentialProvider | None = None,
         default_headers: Mapping[str, str] | None = None,
+        request_body_preparer=None,
+        context_endpoint_scope: str | None = None,
     ) -> None:
         super().__init__(
             config,
@@ -70,4 +72,6 @@ class GoogleOpenAIProvider(OpenAIChatProvider):
             admission=admission,
             api_key_provider=api_key_provider,
             default_headers=default_headers,
+            request_body_preparer=request_body_preparer,
+            context_endpoint_scope=context_endpoint_scope,
         )

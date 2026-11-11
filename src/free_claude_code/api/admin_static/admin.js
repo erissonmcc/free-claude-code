@@ -21,6 +21,8 @@ const state = {
   codeCatalogRetry: false,
   modelOptionsRequest: 0,
   activeView: viewFromLocation(),
+  usageTimer: null,
+  usageRequest: null,
 };
 
 const MASKED_SECRET = "********";
@@ -61,6 +63,7 @@ const VIEW_GROUPS = [
     sections: [],
     containerId: "codeRoot",
   },
+  { id: "usage", label: "Token usage", title: "Token usage", sections: [], containerId: "view-usage" },
 ];
 
 function viewFromLocation() {
@@ -291,6 +294,16 @@ function setActiveView(viewId, { scroll = false } = {}) {
   }
   if (activeView.id === "code") window.CodeSessions.activate(window.location.pathname);
   else window.CodeSessions.deactivate();
+  clearInterval(state.usageTimer);
+  state.usageTimer = null;
+  state.usageRequest?.abort();
+  state.usageRequest = null;
+  if (activeView.id === "usage") {
+    void refreshTokenUsage();
+    state.usageTimer = setInterval(() => {
+      if (!document.hidden && state.activeView === "usage") void refreshTokenUsage();
+    }, 5000);
+  }
   if (activeView.id === "integrations") {
     refreshClaudeIntegration();
     refreshVSCodeChatIntegration();
@@ -299,6 +312,232 @@ function setActiveView(viewId, { scroll = false } = {}) {
     refreshClaudeDesktopIntegration();
     refreshDshDesktopIntegration();
   }
+}
+
+function formatUsage(value) {
+  return value == null ? "Unavailable" : Number(value).toLocaleString();
+}
+
+function usageMetric(label, value) {
+  const card = document.createElement("article");
+  card.className = "usage-metric";
+  const name = document.createElement("span");
+  name.textContent = label;
+  const amount = document.createElement("strong");
+  amount.textContent = typeof value === "string" ? value : formatUsage(value);
+  card.append(name, amount);
+  return card;
+}
+
+function renderUsageCosts(groups) {
+  const container = byId("usageCosts");
+  container.replaceChildren();
+  if (!groups.length) {
+    container.textContent = "No Vertex usage with configured pricing yet.";
+    return;
+  }
+  const brl = (value) => value == null ? "Unavailable" :
+    new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL", minimumFractionDigits: 4, maximumFractionDigits: 4 }).format(value);
+  const sumAvailable = (field) => {
+    const values = groups.map((group) => group[field]).filter((value) =>
+      value != null && Number.isFinite(Number(value)));
+    return values.length ? values.reduce((total, value) => total + Number(value), 0) : null;
+  };
+  const totalCard = document.createElement("article");
+  totalCard.className = "provider-strip usage-cache-card usage-total-card";
+  const totalTitle = document.createElement("h4");
+  totalTitle.textContent = "All models combined";
+  const totalNote = document.createElement("p");
+  totalNote.className = "usage-note";
+  totalNote.textContent = "Combined estimated cost across every model with available pricing.";
+  const totalMetrics = document.createElement("div");
+  totalMetrics.className = "usage-summary";
+  [
+    ["Estimated total (Global)", brl(sumAvailable("estimated_cost_brl"))],
+    ["Regional scenario (+10%)", brl(sumAvailable("estimated_cost_brl_non_global"))],
+  ].forEach(([label, value]) => totalMetrics.append(usageMetric(label, value)));
+  totalCard.append(totalTitle, totalNote, totalMetrics);
+  container.append(totalCard);
+  groups.forEach((group) => {
+    const card = document.createElement("article");
+    card.className = "provider-strip usage-cache-card";
+    const title = document.createElement("h4");
+    title.textContent = `${group.provider} / ${group.model}`;
+    const note = document.createElement("p");
+    note.className = "usage-note";
+    const messages = {
+      pricing_unavailable: "Pricing is not configured for this model.",
+      pricing_expired: "The configured model pricing has expired.",
+      usage_unavailable: "No complete provider usage records are available yet.",
+      estimated: "Estimated from provider-reported token counts.",
+      partial_estimate: "Partial estimate: some calls did not report all token categories.",
+    };
+    note.textContent = messages[group.status] || "Cost estimate unavailable.";
+    const metrics = document.createElement("div");
+    metrics.className = "usage-summary";
+    [
+      ["Estimated total (Global)", brl(group.estimated_cost_brl)],
+      ["Regional scenario (+10%)", brl(group.estimated_cost_brl_non_global)],
+      ["Calls included", `${formatUsage(group.reported_calls)} / ${formatUsage(group.calls)}`],
+      ["Normal input tokens", group.normal_input_tokens],
+      ["Cached input tokens", group.cached_input_tokens],
+      ["Output tokens", group.output_tokens],
+    ].forEach(([label, value]) => metrics.append(usageMetric(label, value)));
+    const fx = document.createElement("p");
+    fx.className = "usage-note";
+    fx.textContent = group.usd_to_brl == null
+      ? "BRL conversion rate unavailable."
+      : `USD/BRL reference: R$ ${Number(group.usd_to_brl).toFixed(4)} (verified ${group.usd_to_brl_verified_at || "date unavailable"}). Global endpoint pricing assumed; endpoint region is not identified.`;
+    card.append(title, note, metrics, fx);
+    if (group.price_source || group.fx_source) {
+      const sources = document.createElement("p");
+      sources.className = "usage-note";
+      if (group.price_source) {
+        const priceLink = document.createElement("a");
+        priceLink.href = group.price_source;
+        priceLink.textContent = "Google Vertex pricing";
+        priceLink.target = "_blank";
+        priceLink.rel = "noopener noreferrer";
+        sources.append(priceLink);
+      }
+      if (group.fx_source) {
+        if (sources.childNodes.length) sources.append(" · ");
+        const fxLink = document.createElement("a");
+        fxLink.href = group.fx_source;
+        fxLink.textContent = "USD/BRL reference";
+        fxLink.target = "_blank";
+        fxLink.rel = "noopener noreferrer";
+        sources.append(fxLink);
+      }
+      card.append(sources);
+    }
+    container.append(card);
+  });
+}
+
+function renderGoogleCacheBaseline(groups) {
+  const container = byId("usageCacheBaseline");
+  container.replaceChildren();
+  if (!groups.length) { container.textContent = "No Vertex calls recorded yet."; return; }
+  const statuses = {
+    pricing_unavailable: "Add current model prices to estimate cache costs.",
+    pricing_expired: "Price verification is expired or not yet valid.",
+    scope_unavailable: "Some calls have no trustworthy session scope.",
+    endpoint_scope_unavailable: "No trustworthy Google project or endpoint scope.",
+    usage_unavailable: "Provider input/cache usage is incomplete or invalid.",
+    no_eligible_prefix: "No stable prefix meets this model's cache minimum.",
+    collecting: "Collecting the baseline before evaluating explicit caching.",
+    not_economical: "Explicit caching is not economical for this sample.",
+    projection_favorable: "Positive cost projection. Explicit caching remains inactive.",
+  };
+  const percent = (value) => value == null ? "Unavailable" : `${(value * 100).toFixed(1)}%`;
+  const money = (value) => value == null ? "Unavailable" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 6 }).format(value);
+  groups.forEach((group) => {
+    const card = document.createElement("article"); card.className = "provider-strip usage-cache-card";
+    const title = document.createElement("h4"); title.textContent = `${group.provider} / ${group.model}${group.endpoint_scope ? ` · ${group.endpoint_scope}` : ""}`;
+    const status = document.createElement("p"); status.className = "usage-note";
+    status.textContent = statuses[group.status] || "Cache evaluation unavailable.";
+    const progress = document.createElement("p"); progress.className = "usage-note";
+    progress.textContent = `${Number(group.collected_days || 0).toFixed(1)} / ${group.required_days} days · ${formatUsage(group.eligible_calls)} / ${group.required_calls} eligible calls · ${formatUsage(group.usage_known_calls)} / ${formatUsage(group.calls)} calls reporting valid cache usage · ${formatUsage(group.scoped_calls)} scoped calls · ${formatUsage(group.legacy_calls || 0)} older calls excluded`;
+    const metrics = document.createElement("div"); metrics.className = "usage-summary";
+    [
+      ["Normal input tokens (reported)", group.normal_input_tokens],
+      ["Cached input tokens (reported)", group.cached_input_tokens],
+      ["Output tokens (reported)", group.output_tokens],
+      ["Measured cache-hit rate", percent(group.cache_hit_rate)],
+      ["Repeated stable prefixes", percent(group.prefix_reuse_rate)],
+      ["Current prefix cost (estimated)", money(group.estimated_baseline_prefix_usd)],
+      ["Explicit cache writes (estimated)", money(group.estimated_cache_creation_usd)],
+      ["Explicit cache reads (estimated)", money(group.estimated_cache_reads_usd)],
+      ["TTL storage (estimated)", money(group.estimated_cache_storage_usd)],
+      ["Net savings (estimated)", money(group.estimated_net_savings_usd)],
+    ].forEach(([label, value]) => metrics.append(usageMetric(label, value)));
+    card.append(title, status, progress, metrics);
+    if (group.price_source) {
+      const source = document.createElement("p"); source.className = "usage-note";
+      source.textContent = `Pricing verified ${group.price_verified_at}, valid through ${group.price_valid_until}; candidate TTL ${group.candidate_ttl_seconds}s. `;
+      const link = document.createElement("a"); link.href = group.price_source;
+      link.textContent = "Google price source"; link.target = "_blank"; link.rel = "noopener noreferrer";
+      source.append(link); card.append(source);
+    }
+    container.append(card);
+  });
+}
+
+function renderUsageChart(containerId, series, lines) {
+  const container = byId(containerId);
+  container.replaceChildren();
+  if (!series.length) { container.textContent = "No completed calls yet."; return; }
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 600 190"); svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", lines.map((line) => line.label).join(", "));
+  const knownValues = lines.flatMap((line) => series.map((item) => item[line.key]).filter((value) => value != null).map(Number));
+  if (!knownValues.length) { container.textContent = "Provider usage is unavailable for this period."; return; }
+  const max = Math.max(1, ...knownValues);
+  lines.forEach((line, index) => {
+    const points = series.flatMap((item, i) => {
+      if (item[line.key] == null) return [];
+      const x = series.length === 1 ? 300 : 12 + i * (576 / (series.length - 1));
+      const y = 170 - (Number(item[line.key]) / max) * 150;
+      return `${x},${y}`;
+    }).join(" ");
+    if (!points) return;
+    const polyline = document.createElementNS(ns, "polyline");
+    polyline.setAttribute("points", points); polyline.setAttribute("fill", "none");
+    polyline.setAttribute("stroke", ["#6b8afd", "#54c6a3", "#f0b45a", "#c08af5"][index % 4]);
+    polyline.setAttribute("stroke-width", "3"); svg.append(polyline);
+  });
+  container.append(svg);
+  const legend = document.createElement("div"); legend.className = "usage-legend";
+  lines.forEach((line, index) => {
+    const label = document.createElement("span");
+    const values = series.map((item) => item[line.key]).filter((value) => value != null).map(Number);
+    label.textContent = `${line.label}: ${values.length ? formatUsage(values.reduce((sum, value) => sum + value, 0)) : "Unavailable"}`;
+    label.style.setProperty("--legend-color", ["#6b8afd", "#54c6a3", "#f0b45a", "#c08af5"][index % 4]); legend.append(label);
+  });
+  container.append(legend);
+}
+
+async function refreshTokenUsage() {
+  if (state.usageRequest || state.activeView !== "usage") return;
+  const controller = new AbortController(); state.usageRequest = controller;
+  try {
+    const data = await api("/admin/api/token-usage?limit=100", { signal: controller.signal });
+    if (state.activeView !== "usage") return;
+    const totals = data.totals || {};
+    renderUsageCosts(data.usage_costs || []);
+    renderGoogleCacheBaseline(data.cache_baseline || []);
+    const summary = byId("usageSummary"); summary.replaceChildren(
+      usageMetric("Completed calls", totals.calls || 0),
+      usageMetric("Normal input tokens", totals.normal_input_tokens),
+      usageMetric("Cached input tokens", totals.cached_input_tokens),
+      usageMetric("Cache write tokens", totals.cache_creation_input_tokens),
+      usageMetric("Calls reporting cache", `${formatUsage(totals.cache_usage_calls)} / ${formatUsage(totals.calls)}`),
+      usageMetric("Output tokens", totals.output_tokens),
+      usageMetric("Estimated context tokens saved", totals.estimated_tokens_saved),
+      usageMetric("Messages before compaction", totals.estimated_messages_before),
+      usageMetric("Messages sent after compaction", totals.estimated_messages_after),
+      usageMetric("Internal summary calls", totals.internal_summary_calls),
+    );
+    renderUsageChart("usageCallsChart", data.series || [], [{ key: "calls", label: "Calls" }]);
+    renderUsageChart("usageTokensChart", data.series || [], [
+      { key: "normal_input_tokens", label: "Normal input" },
+      { key: "cached_input_tokens", label: "Cached input" },
+      { key: "cache_creation_input_tokens", label: "Cache writes" },
+      { key: "output_tokens", label: "Output" },
+    ]);
+    renderUsageChart("usageSavingsChart", data.series || [], [{ key: "estimated_tokens_saved", label: "Estimated saved" }]);
+    const body = byId("usageRecent"); body.replaceChildren();
+    (data.recent || []).forEach((item) => {
+      const row = document.createElement("tr");
+      const cells = [new Date(item.occurred_at).toLocaleString(), `${item.provider} / ${item.model}`, formatUsage(item.normal_input_tokens), formatUsage(item.cached_input_tokens), formatUsage(item.cache_creation_input_tokens), formatUsage(item.output_tokens), formatUsage(item.estimated_tokens_saved)];
+      cells.forEach((value) => { const cell = document.createElement("td"); cell.textContent = value; row.append(cell); }); body.append(row);
+    });
+    byId("usageWindow").textContent = data.oldest_retained_at ? `Retained history begins ${new Date(data.oldest_retained_at).toLocaleString()}.` : "No usage history is recorded yet.";
+  } catch (error) {
+    if (error.name !== "AbortError") byId("usageWindow").textContent = `Usage data unavailable: ${error.message}`;
+  } finally { if (state.usageRequest === controller) state.usageRequest = null; }
 }
 
 function navigateToView(viewId) {

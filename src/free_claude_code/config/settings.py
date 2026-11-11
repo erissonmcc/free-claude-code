@@ -16,6 +16,7 @@ from .constants import DEFAULT_MODEL, HTTP_CONNECT_TIMEOUT_DEFAULT
 from .custom_providers import CustomProviderDefinition, decode_custom_providers
 from .model_refs import parse_model_fallbacks
 from .nim import NimSettings
+from .google_cache import GoogleCachePrice, decode_google_cache_prices
 from .provider_catalog import (
     BEDROCK_DEFAULT_BASE,
     SUPPORTED_PROVIDER_IDS,
@@ -275,6 +276,17 @@ class Settings(BaseModel):
     # ==================== Google Gemini (Google AI Studio) ====================
     gemini_api_key: OptionalNonEmptyString = Field(
         default=None, validation_alias="GEMINI_API_KEY"
+    )
+
+    # ==================== Google AI Studio OAuth ====================
+    google_oauth_client_id: OptionalNonEmptyString = Field(
+        default=None, validation_alias="GOOGLE_OAUTH_CLIENT_ID"
+    )
+    google_oauth_client_secret: OptionalNonEmptyString = Field(
+        default=None, validation_alias="GOOGLE_OAUTH_CLIENT_SECRET"
+    )
+    gemini_oauth_project_id: OptionalNonEmptyString = Field(
+        default=None, validation_alias="GEMINI_OAUTH_PROJECT_ID"
     )
 
     # ==================== Google Vertex AI ====================
@@ -637,6 +649,46 @@ class Settings(BaseModel):
         lt=float(1 << 64),
         allow_inf_nan=False,
         validation_alias="PROVIDER_PROGRESS_TIMEOUT",
+    )
+    # ==================== Context Management ====================
+    context_management_enabled: bool = Field(
+        default=True, validation_alias="FCC_CONTEXT_MANAGEMENT_ENABLED"
+    )
+    google_cache_prices: Annotated[
+        tuple[GoogleCachePrice, ...], BeforeValidator(decode_google_cache_prices)
+    ] = Field(default=(), validation_alias="FCC_GOOGLE_CACHE_PRICES")
+
+    @field_validator("google_cache_prices")
+    @classmethod
+    def unique_google_cache_prices(cls, value):
+        keys = [(price.provider, price.model) for price in value]
+        if len(set(keys)) != len(keys):
+            raise ValueError("duplicate provider/model cache price")
+        return value
+
+    context_max_input_tokens: int | None = Field(
+        default=None, gt=0, validation_alias="FCC_CONTEXT_MAX_INPUT_TOKENS"
+    )
+    context_response_reserve_tokens: int = Field(
+        default=8192, gt=0, validation_alias="FCC_CONTEXT_RESPONSE_RESERVE_TOKENS"
+    )
+    context_min_recent_messages: int = Field(
+        default=6, gt=0, validation_alias="FCC_CONTEXT_MIN_RECENT_MESSAGES"
+    )
+    context_max_tool_result_tokens: int = Field(
+        default=20000, gt=0, validation_alias="FCC_CONTEXT_MAX_TOOL_RESULT_TOKENS"
+    )
+    context_summary_target_tokens: int = Field(
+        default=2048, gt=0, validation_alias="FCC_CONTEXT_SUMMARY_TARGET_TOKENS"
+    )
+    context_max_compaction_passes: int = Field(
+        default=3, gt=0, validation_alias="FCC_CONTEXT_MAX_COMPACTION_PASSES"
+    )
+    context_growth_limit_percent: int = Field(
+        default=25,
+        ge=0,
+        le=100,
+        validation_alias="FCC_CONTEXT_GROWTH_LIMIT_PERCENT",
     )
     reasoning_policy: ReasoningPreference = Field(
         default=ReasoningPreference.CLIENT,

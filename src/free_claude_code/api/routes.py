@@ -28,6 +28,7 @@ from free_claude_code.core.json_types import JsonObject
 from free_claude_code.core.openai_responses import OpenAIResponsesRequest
 from free_claude_code.core.trace import trace_event
 
+from .compact_history import restore_compact_history
 from .dependencies import (
     get_services,
     get_settings,
@@ -38,6 +39,7 @@ from .dependencies import (
 from .handlers import MessagesHandler, ResponsesHandler, TokenCountHandler
 from .model_catalog import (
     ModelCatalogView,
+    ModelResponse,
     ModelsListResponse,
     build_models_list_response,
     build_muse_models_list_response,
@@ -70,6 +72,7 @@ async def _create_messages_response(
             if isinstance(request_data, MessagesRequest)
             else request_data
         )
+        raw = restore_compact_history(raw)
         model = raw.get("model")
         resolved = (
             router.resolve(model) if isinstance(model, str) and model.strip() else None
@@ -103,6 +106,7 @@ async def _create_messages_response(
             generation_id=lease.generation_id,
             request_headers=request_headers,
             model_info_lookup=lease.model_info,
+            usage_recorder=services.admin.record_token_usage,
         )
         if native:
             assert resolved is not None
@@ -146,6 +150,7 @@ async def _create_responses_response(
             generation_id=lease.generation_id,
             request_headers=request_headers,
             model_info_lookup=lease.model_info,
+            usage_recorder=services.admin.record_token_usage,
         )
         response = await handler.create(request_data, request_id=request_id)
     except ApplicationError as exc:
@@ -306,6 +311,31 @@ async def list_models(
         snapshot,
         view=view or x_fcc_model_view or ModelCatalogView.CLAUDE,
     )
+
+
+@router.get(
+    "/v1/models/{model_id:path}",
+    response_model=ModelResponse,
+    response_model_exclude_none=True,
+)
+async def retrieve_model(
+    model_id: str,
+    services: ApiServices = Depends(get_services),
+    _auth=Depends(require_proxy_auth),
+):
+    """Retrieve one model using the same IDs exposed by the Claude catalog."""
+    trace_event(stage="ingress", event="free_claude_code.api.models.retrieve", source="api")
+    snapshot = await services.requests.wait_for_catalog()
+    catalog = build_models_list_response(
+        snapshot.settings, snapshot, view=ModelCatalogView.CLAUDE
+    )
+    model = next((entry for entry in catalog.data if entry.id == model_id), None)
+    if model is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"type": "not_found_error", "message": f"Model {model_id} not found"},
+        )
+    return model
 
 
 @router.get(

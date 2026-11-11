@@ -18,6 +18,9 @@ def provider_config_status(
     """Return provider configuration status without making network calls."""
     statuses: list[JsonObject] = []
     for provider_id, descriptor in PROVIDER_CATALOG.items():
+        # Keep the legacy OAuth adapter available internally, but hide it from Admin.
+        if provider_id == "gemini_oauth":
+            continue
         metadata = {
             "provider_id": provider_id,
             "display_name": descriptor.display_name,

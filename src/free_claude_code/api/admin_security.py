@@ -1,6 +1,8 @@
 """Shared local-only security boundary for Admin product surfaces."""
 
 import ipaddress
+import os
+import secrets
 from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request
@@ -56,12 +58,20 @@ def _authority_is_local(authority: str | None) -> bool:
 
 
 def require_loopback_admin(request: Request) -> None:
-    """Allow Admin access only from the local machine."""
+    """Allow local Admin access or authenticated access to a hosted instance."""
 
     client_host = request.client.host if request.client else None
-    if not _is_loopback_host(client_host):
-        raise HTTPException(status_code=403, detail="Admin UI is local-only")
-    if not _authority_is_local(request.headers.get("host")):
-        raise HTTPException(status_code=403, detail="Admin UI is local-only")
-    if not _origin_is_local(request.headers.get("origin")):
-        raise HTTPException(status_code=403, detail="Admin UI is local-only")
+    if _is_loopback_host(client_host) and _authority_is_local(
+        request.headers.get("host")
+    ) and _origin_is_local(request.headers.get("origin")):
+        return
+
+    expected = os.environ.get("FCC_ADMIN_AUTH_TOKEN", "").strip()
+    authorization = request.headers.get("authorization", "")
+    scheme, _, supplied = authorization.partition(" ")
+    if (
+        not expected
+        or scheme.casefold() != "bearer"
+        or not secrets.compare_digest(supplied.strip(), expected)
+    ):
+        raise HTTPException(status_code=401, detail="Admin authentication required")

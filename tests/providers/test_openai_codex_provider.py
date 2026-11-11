@@ -127,6 +127,7 @@ def _responses_request() -> OpenAIResponsesRequest:
             "previous_response_id": "resp_previous",
             "max_output_tokens": 1024,
             "metadata": {"source": "test"},
+            "temperature": 0.2,
             "future_option": {"enabled": True},
         }
     )
@@ -139,6 +140,7 @@ def _client_control_request() -> MessagesRequest:
             "max_tokens": 1024,
             "messages": [{"role": "user", "content": "hello"}],
             "metadata": {"user_id": "example-user"},
+            "temperature": 0.2,
             "thinking": {"type": "adaptive", "display": "omitted"},
             "context_management": {
                 "edits": [
@@ -500,6 +502,7 @@ async def test_provider_accepts_claude_client_controls_before_upstream_io() -> N
     assert payload["reasoning"] == {"effort": "high", "summary": "auto"}
     assert "max_output_tokens" not in payload
     assert "metadata" not in payload
+    assert "temperature" not in payload
     assert "context_management" not in payload
     assert "output_config" not in payload
     assert request.model_dump() == original_request
@@ -545,6 +548,7 @@ async def test_provider_relays_native_responses_with_private_field_policy() -> N
     assert "previous_response_id" not in upstream
     assert "max_output_tokens" not in upstream
     assert "metadata" not in upstream
+    assert "temperature" not in upstream
     assert request.model_dump() == original
 
     events = parse_sse_text(body)

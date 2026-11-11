@@ -13,7 +13,7 @@ requires-python = "==3.14.7"
 dependencies = [
     "packaging>=26.3",
     "anyio>=4.15.1",
-    "fastapi[standard]>=0.141.1",
+    "fastapi>=0.141.1",
     "uvicorn>=0.54.0",
     "httpx[socks]>=0.28.1",
     "httpx2[socks]>=2.7.0,<3",
@@ -34,10 +34,8 @@ dependencies = [
     "pystray>=0.19.5; sys_platform == 'win32' or sys_platform == 'darwin'",
     "Pillow>=12.0.0; sys_platform == 'win32' or sys_platform == 'darwin'",
     "github-copilot-sdk>=1.0.15",
+    "claude-agent-sdk>=0.2.0",
     "simplejson>=4.1.2",
-    "grpcio>=1.84.0",
-    "grpcio-tools>=1.81.1",
-    "nvidia-riva-client>=2.26.0",
     "pyperclip>=1.11.0",
     "sqlalchemy>=2.1.1",
     "ruamel-yaml>=0.19.1",
@@ -99,7 +97,7 @@ dev = [
     "ty>=0.0.84",
     "ruff>=0.16.9",
     "pytest-xdist>=3.8.0",
-    "pytest-playwright>=0.9.0",
+    "pytest-playwright>=0.9.0; sys_platform != 'android'",
     "pyyaml>=6.0.3",
 ]
 

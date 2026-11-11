@@ -24,7 +24,7 @@ from tests.providers.request_factory import make_messages_request
 pytestmark = pytest.mark.asyncio
 
 
-def _transport(client: AsyncOpenAI) -> OpenAIChatTransport:
+def _transport(client: AsyncOpenAI, **transport_options) -> OpenAIChatTransport:
     return OpenAIChatTransport(
         client=client,
         admission=ProviderAdmissionController(
@@ -43,6 +43,7 @@ def _transport(client: AsyncOpenAI) -> OpenAIChatTransport:
         read_timeout_s=2,
         log_raw_sse_events=False,
         log_api_error_tracebacks=False,
+        **transport_options,
     )
 
 
@@ -101,6 +102,70 @@ async def test_borrowed_client_remains_usable_after_failed_and_successful_turns(
         assert not client.is_closed()
         assert (await client.models.list()).data[0].id == "model"
         assert calls == 2
+
+
+async def test_chat_outbound_context_hook_runs_at_final_sdk_boundary(monkeypatch):
+    seen = []
+
+    async def prepare(protocol, body, provider):
+        seen.append((protocol, body.get("model"), provider))
+        return dict(body)
+
+    monkeypatch.setattr(
+        "free_claude_code.providers.openai_chat.transport.prepare_outbound_context",
+        prepare,
+    )
+    async with AsyncOpenAI(
+        api_key="test",
+        base_url="https://provider.invalid/v1",
+        max_retries=0,
+        http_client=httpx2.AsyncClient(
+            transport=httpx2.MockTransport(lambda _request: _success())
+        ),
+    ) as client:
+        await _consume(_transport(client), "messages")
+    assert seen == [("chat", "model", "TEST")]
+
+
+async def test_chat_body_preparer_runs_after_context_and_reaches_provider_wire(monkeypatch):
+    calls = []
+    scopes = []
+
+    async def prepare_context(protocol, body, provider, **scope):
+        scopes.append((protocol, provider, scope))
+        return dict(body)
+
+    async def prepare_cached_body(body):
+        prepared = dict(body)
+        prepared["messages"] = [{"role": "user", "content": "question"}]
+        prepared["extra_body"] = {"google": {"cached_content": "cachedContents/cache1"}}
+        return prepared
+
+    monkeypatch.setattr(
+        "free_claude_code.providers.openai_chat.transport.prepare_outbound_context",
+        prepare_context,
+    )
+
+    def reply(request):
+        calls.append(json.loads(request.content))
+        return _success()
+
+    async with AsyncOpenAI(
+        api_key="test",
+        base_url="https://provider.invalid/v1",
+        max_retries=0,
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(reply)),
+    ) as client:
+        transport = _transport(
+            client,
+            request_body_preparer=prepare_cached_body,
+            context_endpoint_scope="vertex-project-scope",
+        )
+        await _consume(transport, "messages")
+
+    assert scopes == [("chat", "TEST", {"endpoint_scope": "vertex-project-scope"})]
+    assert calls[0]["messages"] == [{"role": "user", "content": "question"}]
+    assert calls[0]["google"]["cached_content"].endswith("cache1")
 
 
 @pytest.mark.parametrize("wire", ["messages", "responses"])

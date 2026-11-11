@@ -714,7 +714,9 @@
       "New code session",
       (form, context) => {
         const harness = element("select");
-        harness.append(new Option("Codex", "codex"));
+        for (const option of harnesses) {
+          harness.append(new Option(option.name, option.id));
+        }
         const folder = element("input");
         folder.required = true;
         folder.autocomplete = "off";
@@ -786,7 +788,7 @@
           method: "POST",
           body: JSON.stringify({
             session_id: id,
-            harness: "codex",
+            harness: harness.value,
             cwd: readFolder(),
           }),
         });

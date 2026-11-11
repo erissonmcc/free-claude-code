@@ -211,6 +211,28 @@
             </dialog>
           </section>
 
+          <section id="view-usage" class="admin-view" data-view="usage" hidden>
+            <div class="usage-summary" id="usageSummary" aria-live="polite"></div>
+            <p class="usage-note">Compaction savings are estimates. Provider usage is reported separately; cache fields may be unavailable.</p>
+            <div class="usage-charts">
+              <article class="provider-strip"><h3>Calls by day</h3><div id="usageCallsChart" class="usage-chart"></div></article>
+              <article class="provider-strip"><h3>Tokens by day</h3><div id="usageTokensChart" class="usage-chart"></div></article>
+              <article class="provider-strip"><h3>Estimated context savings</h3><div id="usageSavingsChart" class="usage-chart"></div></article>
+            </div>
+            <article class="provider-strip usage-recent"><h3>Recent completed calls</h3><div class="usage-table-wrap"><table><thead><tr><th>Time</th><th>Provider / model</th><th>Input</th><th>Cache read</th><th>Cache write</th><th>Output</th><th>Estimated saved</th></tr></thead><tbody id="usageRecent"></tbody></table></div></article>
+            <section class="usage-cache-section" aria-labelledby="usageCostHeading">
+              <h3 id="usageCostHeading">Estimated API cost (BRL)</h3>
+              <p class="usage-note">Updates with token usage every 5 seconds. Calculated from provider-reported normal input, cached input and output tokens. Global Vertex pricing is assumed; the regional scenario is shown separately when endpoint scope is unknown. USD/BRL is a dated reference rate, not a live bank quote.</p>
+              <div id="usageCosts"></div>
+            </section>
+            <section class="usage-cache-section" aria-labelledby="usageCacheHeading">
+              <h3 id="usageCacheHeading">Vertex cache baseline</h3>
+              <p class="usage-note">Explicit caching is inactive during measurement. Token counts come from provider usage. Write, read, storage and net savings costs are hypothetical estimates in USD for the stable prefix, including the full candidate TTL. Unknown costs remain unavailable.</p>
+              <div id="usageCacheBaseline"></div>
+            </section>
+            <p id="usageWindow" class="usage-note"></p>
+          </section>
+
           <section id="view-code" class="admin-view" data-view="code" hidden>
             <div id="codeRoot" class="code-root session-root" aria-live="off"></div>
           </section>

@@ -22,7 +22,10 @@ from free_claude_code.messaging.voice import Transcriber
 from free_claude_code.providers.base import BaseProvider, ProviderConfig
 from free_claude_code.providers.github_copilot.auth import CopilotAuthManager
 from free_claude_code.providers.openai_codex.auth import OpenAIAuthManager
+from free_claude_code.providers.gemini.oauth import GoogleOAuthAuthManager
 from free_claude_code.providers.runtime.runtime import ProviderRuntime, create_provider
+from free_claude_code.runtime.token_usage_sqlite import SQLiteTokenUsageStore
+from free_claude_code.runtime.vertex_cache_sqlite import SQLiteVertexCacheStore
 
 if TYPE_CHECKING:
     from free_claude_code.providers.admission import ProviderAdmissionController
@@ -31,6 +34,7 @@ if TYPE_CHECKING:
 from .application import ApplicationRuntime, RestartCallback
 from .asgi import RuntimeASGIApp
 from .code_sessions_sqlite import SQLiteCodeStore
+from .claude_agent import ClaudeAgentHarnessFactory
 from .codex_app_server import CodexHarnessFactory
 from .codex_catalog import CodexModelCatalogPublisher
 from .configuration import ConfigurationService
@@ -52,13 +56,25 @@ def build_asgi_app(
     )
     openai_auth = OpenAIAuthManager(proxy=settings.openai_proxy)
     copilot_auth = CopilotAuthManager()
+    google_auth = GoogleOAuthAuthManager()
+    database = SQLiteDatabase(
+        fcc_database_path(), code_lock_path(), legacy_path=legacy_code_database_path()
+    )
     copilot_factory = partial(_load_copilot_provider, auth=copilot_auth)
     openai_factory = partial(_load_openai_provider, auth=openai_auth)
+    google_factory = partial(_load_gemini_oauth_provider, auth=google_auth)
+    vertex_factory = partial(
+        _load_vertex_provider,
+        cache_store=SQLiteVertexCacheStore(database),
+        token_usage_store=SQLiteTokenUsageStore(database),
+    )
     provider_constructor = partial(
         create_provider,
         provider_loaders={
             "openai": openai_factory,
             "github_copilot": copilot_factory,
+            "gemini_oauth": google_factory,
+            "vertex": vertex_factory,
         },
     )
     runtime_factory = partial(
@@ -71,15 +87,16 @@ def build_asgi_app(
         connected_provider_ids=lambda: (
             *openai_auth.connected_provider_ids(),
             *copilot_auth.connected_provider_ids(),
+            *google_auth.connected_provider_ids(),
         ),
         model_catalog_publisher=CodexModelCatalogPublisher(),
     )
-    database = SQLiteDatabase(
-        fcc_database_path(), code_lock_path(), legacy_path=legacy_code_database_path()
-    )
     code_service = CodeService(
         SQLiteCodeStore(database),
-        CodexHarnessFactory(provider_manager),
+        {
+            "codex": CodexHarnessFactory(provider_manager),
+            "claude": ClaudeAgentHarnessFactory(provider_manager),
+        },
     )
     runtime = ApplicationRuntime(
         provider_manager,
@@ -89,7 +106,11 @@ def build_asgi_app(
         transcriber=None,
         transcriber_factory=_create_transcriber,
         restart_callback=restart_callback,
-        connected_accounts={"openai": openai_auth, "github_copilot": copilot_auth},
+        connected_accounts={
+            "openai": openai_auth,
+            "github_copilot": copilot_auth,
+            "gemini_oauth": google_auth,
+        },
     )
     services = ApiServices(
         requests=provider_manager,
@@ -114,6 +135,15 @@ def _load_openai_provider(*, auth: OpenAIAuthManager) -> ProviderFactory:
     return construct
 
 
+def _load_vertex_provider(*, cache_store, token_usage_store) -> ProviderFactory:
+    from free_claude_code.providers.runtime.factory import _load_vertex
+
+    return _load_vertex(
+        cache_store=cache_store,
+        token_usage_store=token_usage_store,
+    )
+
+
 def _load_copilot_provider(*, auth: CopilotAuthManager) -> ProviderFactory:
     from free_claude_code.providers.github_copilot.provider import GitHubCopilotProvider
 
@@ -123,6 +153,32 @@ def _load_copilot_provider(*, auth: CopilotAuthManager) -> ProviderFactory:
         admission: ProviderAdmissionController,
     ) -> BaseProvider:
         return GitHubCopilotProvider(config, auth=auth, admission=admission)
+
+    return construct
+
+
+def _required_google_project(value: str | None) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise AssertionError("Gemini OAuth requires GEMINI_OAUTH_PROJECT_ID")
+    return value.strip()
+
+
+def _load_gemini_oauth_provider(*, auth: GoogleOAuthAuthManager) -> ProviderFactory:
+    from free_claude_code.providers.gemini import GeminiProvider
+
+    def construct(
+        config: ProviderConfig,
+        settings: Settings,
+        admission: ProviderAdmissionController,
+    ) -> BaseProvider:
+        return GeminiProvider(
+            config,
+            admission=admission,
+            api_key_provider=auth.access_token,
+            default_headers={
+                "x-goog-user-project": _required_google_project(settings.gemini_oauth_project_id),
+            },
+        )
 
     return construct
 

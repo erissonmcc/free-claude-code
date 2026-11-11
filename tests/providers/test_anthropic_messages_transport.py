@@ -301,6 +301,73 @@ async def test_model_metadata_cannot_relax_declared_profile_cap(
     assert bodies[0]["max_tokens"] == expected
 
 
+@pytest.mark.asyncio
+async def test_messages_outbound_context_hook_runs_at_final_http_boundary(monkeypatch):
+    seen = []
+
+    async def prepare(protocol, body, provider):
+        seen.append((protocol, body.get("model"), provider))
+        return dict(body)
+
+    monkeypatch.setattr(
+        "free_claude_code.providers.anthropic_messages.transport.prepare_outbound_context",
+        prepare,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=Wire([_sse(*_events())]),
+            )
+        )
+    ) as client:
+        output = [
+            event async for event in _stream(_transport(client), Endpoint(), responses=False)
+        ]
+    assert output
+    assert seen == [("messages", "native", "TEST")]
+
+
+@pytest.mark.asyncio
+async def test_messages_usage_trace_compares_estimate_to_total_input(monkeypatch):
+    traces = []
+    monkeypatch.setattr(
+        "free_claude_code.providers.anthropic_messages.transport.trace_event",
+        lambda **fields: traces.append(fields),
+    )
+    events = _events()
+    events[0]["message"]["usage"] = {
+        "input_tokens": 10,
+        "cache_read_input_tokens": 5,
+        "cache_creation_input_tokens": 2,
+        "output_tokens": 0,
+    }
+    events[-2]["usage"] = {"output_tokens": 3}
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=Wire([_sse(*events)]),
+            )
+        )
+    ) as client:
+        output = [
+            event async for event in _stream(_transport(client), Endpoint(), responses=False)
+        ]
+
+    completed = next(
+        trace for trace in traces if trace.get("event") == "provider.response.completed"
+    )
+    assert output
+    assert completed["actual_input_tokens"] == 17
+    assert completed["normal_input_tokens"] == 10
+    assert completed["cached_input_tokens"] == 5
+    assert completed["total_tokens"] == 20
+
+
 def _stream(
     transport: AnthropicMessagesTransport, endpoint: Endpoint, *, responses: bool
 ) -> AsyncIterator[str]:

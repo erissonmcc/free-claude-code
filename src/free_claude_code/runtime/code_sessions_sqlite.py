@@ -797,6 +797,16 @@ class SQLiteCodeStore:
 
         return await self._run(operation, write=True)
 
+    async def get_item(self, session_id: str, item_id: str) -> CodeItem | None:
+        def operation(connection: sqlite3.Connection) -> CodeItem | None:
+            row = connection.execute(
+                "SELECT * FROM code_items WHERE session_id = ? AND id = ?",
+                (session_id, item_id),
+            ).fetchone()
+            return _record(CodeItem, row) if row else None
+
+        return await self._run(operation, write=False)
+
     async def save_progress(
         self,
         session: CodeSession,

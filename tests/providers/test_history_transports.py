@@ -255,12 +255,17 @@ async def test_provider_a_b_a_preserves_exact_native_history(protocol, wire):
         saved = await _saved_reply(
             send(wire, [{"role": "user", "content": "hello"}]), wire
         )
-        record = decode_replay(_carrier(saved, wire))
-        assert record.native == _native(protocol)
-        assert record.origin.model == (
-            "native" if protocol == "messages" else "actual-returned"
-        )
-        assert record.origin.model != "public-alias"
+        if wire == "responses" and protocol == "responses":
+            # Native Responses clients need the provider's ciphertext verbatim;
+            # an FCC history carrier is not valid encrypted_content upstream.
+            assert _carrier(saved, wire) == "opaque-original"
+        else:
+            record = decode_replay(_carrier(saved, wire))
+            assert record.native == _native(protocol)
+            assert record.origin.model == (
+                "native" if protocol == "messages" else "actual-returned"
+            )
+            assert record.origin.model != "public-alias"
         history = json.loads(
             json.dumps([*saved, {"role": "user", "content": "continue"}])
         )
@@ -268,10 +273,12 @@ async def test_provider_a_b_a_preserves_exact_native_history(protocol, wire):
         async with _harness(protocol, key="b") as (foreign, foreign_bodies, _):
             await _saved_reply(foreign(wire, history), wire)
             foreign_wire = json.dumps(foreign_bodies[-1])
-            assert (
-                "opaque-original" not in foreign_wire
-                and "fcc:history" not in foreign_wire
-            )
+            if wire == "responses" and protocol == "responses":
+                assert "opaque-original" in foreign_wire
+                assert "fcc:history" not in foreign_wire
+            else:
+                assert "opaque-original" not in foreign_wire
+                assert "fcc:history" not in foreign_wire
             assert "Find 17." in foreign_wire
         await _saved_reply(send(wire, history), wire)
         if protocol == "responses":

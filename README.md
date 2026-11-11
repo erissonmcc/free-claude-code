@@ -238,6 +238,7 @@ For another API endpoint, open **Providers → Custom providers → Add provider
 | [Anthropic](https://platform.claude.com/settings/keys) | `ANTHROPIC_API_KEY` | `anthropic/<model-id>` |
 | [Azure OpenAI](https://learn.microsoft.com/azure/foundry/openai/how-to/chatgpt) | `AZURE_OPENAI_API_KEY` and `AZURE_OPENAI_BASE_URL` | `azure_openai/<deployment-name>` |
 | [Google AI Studio (Gemini)](https://aistudio.google.com/apikey) | `GEMINI_API_KEY` | `gemini/models/gemini-3.1-flash-lite` |
+| Google AI Studio (OAuth) | `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GEMINI_OAUTH_PROJECT_ID` | `gemini_oauth/<model-id>` |
 | [Google Vertex AI](https://cloud.google.com/vertex-ai/generative-ai/docs/start/openai) | `VERTEX_PROJECT_ID` + ADC | `vertex/google/gemini-3.5-flash` |
 | [DeepSeek](https://platform.deepseek.com/api_keys) | `DEEPSEEK_API_KEY` | `deepseek/deepseek-chat` |
 | [Mistral La Plateforme](https://console.mistral.ai/) | `MISTRAL_API_KEY` | `mistral/devstral-small-latest` |
@@ -299,6 +300,15 @@ For another API endpoint, open **Providers → Custom providers → Add provider
   Finish signing in, then select a `github_copilot/<model-id>` from the model picker.
   Available models and quotas depend on your subscription and organization policies.
   Restart an already-running agent after connecting.
+- Google AI Studio (OAuth) uses Google authorization-code OAuth with PKCE. In the Admin UI,
+  configure **Google OAuth Client ID**, **Google OAuth Client Secret**, and
+  **Google Cloud Project ID (Gemini OAuth)** under the provider settings, then restart FCC
+  and choose **Providers → OAuth providers → Google AI Studio (OAuth) → Connect**.
+  Create a Google Cloud OAuth client suitable for a local desktop/loopback redirect, enable
+  the Generative Language API, configure the OAuth consent screen, and add your account as
+  a test user while the app is in testing mode. The project must permit Gemini API access.
+  This is Google Cloud API OAuth, not access to an AI Studio subscription entitlement;
+  quotas, billing, and project permissions still apply.
 - Azure OpenAI uses the deployment names from your resource. Set
   `AZURE_OPENAI_BASE_URL` to its complete v1 endpoint, such as
   `https://YOUR-RESOURCE-NAME.openai.azure.com/openai/v1/`, and select a

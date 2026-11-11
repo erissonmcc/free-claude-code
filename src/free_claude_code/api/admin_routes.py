@@ -8,6 +8,7 @@ from fastapi import (
     APIRouter,
     Depends,
     HTTPException,
+    Query,
     Request,
     Response,
 )
@@ -109,6 +110,7 @@ def admin_page_response() -> HTMLResponse:
 @router.get("/admin/model_config", include_in_schema=False)
 @router.get("/admin/messaging", include_in_schema=False)
 @router.get("/admin/integrations", include_in_schema=False)
+@router.get("/admin/usage", include_in_schema=False)
 def admin_page(request: Request):
     require_loopback_admin(request)
     return admin_page_response()
@@ -158,6 +160,20 @@ async def admin_status(
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Vary"] = "Origin"
     return await services.admin.admin_status()
+
+
+@router.get("/admin/api/token-usage")
+async def admin_token_usage(
+    request: Request,
+    since: str | None = None,
+    provider: str | None = None,
+    limit: int = Query(default=100, ge=1, le=1000),
+    services: ApiServices = Depends(get_services),
+):
+    require_loopback_admin(request)
+    return _no_store(
+        await services.admin.token_usage(since=since, provider=provider, limit=limit)
+    )
 
 
 @router.get("/admin/api/providers/{provider_id}/local-status")

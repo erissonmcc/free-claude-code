@@ -158,6 +158,11 @@ run_pytest() {
 }
 
 run_playwright() {
+    if [ "$(uname -o 2>/dev/null || true)" = "Android" ] || [ "${ANDROID_ROOT:-}" != "" ]; then
+        step "playwright (skipped on Android/Termux)"
+        printf "Playwright browser tests are not supported by the current Android wheel; skipping.\n"
+        return 0
+    fi
     step "playwright"
     run uv run playwright install chromium
     run uv run pytest e2e -v --tb=short \

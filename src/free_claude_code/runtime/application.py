@@ -4,8 +4,9 @@ import asyncio
 import inspect
 import logging
 import uuid
+from datetime import datetime, timezone
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 from loguru import logger
 
@@ -19,6 +20,10 @@ from free_claude_code.application.errors import (
     ApplicationUnavailableError,
 )
 from free_claude_code.application.model_metadata import ProviderModelRefreshResult
+from free_claude_code.application.google_cache_baseline import (
+    estimate_usage_costs,
+    evaluate_cache_baseline,
+)
 from free_claude_code.application.ports import StopResult
 from free_claude_code.config.admin.custom_providers import CustomProviderMutation
 from free_claude_code.config.admin.persistence import (
@@ -47,6 +52,7 @@ from .messaging_service import MessagingService
 from .provider_manager import ProviderRuntimeManager
 from .retired_chat import remove_retired_chat_history
 from .sqlite_database import SQLiteDatabase
+from .token_usage_sqlite import SQLiteTokenUsageStore, TokenUsageRecord
 
 RestartCallback = Callable[[], None]
 
@@ -117,6 +123,7 @@ class ApplicationRuntime:
         self._configuration = configuration
         self._code_service = code_service
         self._database = database
+        self._token_usage = SQLiteTokenUsageStore(database) if database is not None else None
         self._folder_picker = NativeFolderPicker()
         self._restart_callback = restart_callback
         self._connected_accounts = dict(connected_accounts or {})
@@ -462,6 +469,54 @@ class ApplicationRuntime:
                 for provider_id, model_ids in self.provider_manager.cached_model_ids().items()
             },
         }
+
+    async def token_usage(
+        self, *, since: str | None = None, provider: str | None = None, limit: int = 100
+    ) -> JsonObject:
+        if self._token_usage is None:
+            return {
+                "totals": {},
+                "series": [],
+                "oldest_retained_at": None,
+                "recent": [],
+                "cache_baseline": [],
+                "usage_costs": [],
+            }
+        snapshot = await self._token_usage.query(since=since, provider=provider, limit=limit)
+        result = snapshot.as_dict()
+        records = tuple(asdict(record) for record in snapshot.cache_observations)
+        result["cache_baseline"] = evaluate_cache_baseline(
+            records,
+            self.settings.google_cache_prices,
+        )
+        result["usage_costs"] = estimate_usage_costs(
+            records,
+            self.settings.google_cache_prices,
+        )
+        return result
+
+    async def record_token_usage(self, usage: Mapping[str, object]) -> None:
+        if self._token_usage is None:
+            return
+        fields = {
+            key: usage.get(key)
+            for key in (
+                "estimated_input_before", "estimated_input_after", "estimated_tokens_saved",
+                "estimated_messages_before", "estimated_messages_after", "internal_summary_calls",
+                "actual_input_tokens", "normal_input_tokens", "cached_input_tokens",
+                "cache_creation_input_tokens", "output_tokens", "total_tokens",
+                "cache_prefix_key", "cache_prefix_tokens",
+                "cache_observation_version", "cache_endpoint_key",
+            )
+        }
+        await self._token_usage.record(TokenUsageRecord(
+            occurred_at=datetime.now(timezone.utc).isoformat(),
+            provider=str(usage.get("provider") or "unknown").lower(),
+            model=str(usage.get("model") or "unknown"),
+            protocol=str(usage.get("protocol") or "unknown"),
+            request_kind=str(usage.get("request_kind") or "generation"),
+            **fields,
+        ))
 
     async def test_provider(self, provider_id: str) -> JsonObject:
         result = await self.provider_manager.refresh_provider(provider_id)

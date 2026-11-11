@@ -50,6 +50,8 @@ class OpenAIChatProvider(BaseProvider):
         api_key_provider: OpenAIAsyncCredentialProvider | None = None,
         client: AsyncOpenAI | None = None,
         endpoint_transport: httpx2.AsyncBaseTransport | None = None,
+        request_body_preparer=None,
+        context_endpoint_scope: str | None = None,
     ) -> None:
         super().__init__(config)
         if behavior is None:
@@ -80,6 +82,8 @@ class OpenAIChatProvider(BaseProvider):
             log_raw_sse_events=config.log_raw_sse_events,
             log_api_error_tracebacks=config.log_api_error_tracebacks,
             endpoint_transport=endpoint_transport,
+            request_body_preparer=request_body_preparer,
+            context_endpoint_scope=context_endpoint_scope,
         )
 
     async def cleanup(self) -> None:

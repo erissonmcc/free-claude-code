@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: fcc-backend
+    runtime: python
+    plan: starter
+    region: oregon
+    buildCommand: pip install uv && uv sync --no-dev
+    startCommand: uv run fcc-server
+    healthCheckPath: /health
+    autoDeploy: false
+    disk:
+      name: fcc-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.14.7
+      - key: HOME
+        value: /opt/render/project/src/data
+      - key: HOST
+        value: 0.0.0.0
+      - key: FCC_OPEN_BROWSER
+        value: "false"
+      - key: FCC_ADMIN_AUTH_TOKEN
+        generateValue: true
