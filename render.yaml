@@ -1,15 +1,15 @@
 services:
   - type: web
-    name: fcc-backend
+    name: fcc-backend-v2
     runtime: python
     plan: starter
     region: oregon
-    buildCommand: pip install uv && uv sync --no-dev
-    startCommand: uv run fcc-server
+    buildCommand: pip install uv && uv sync --no-dev && npm install --no-save @anthropic-ai/claude-code @anthropic-ai/claude-agent-sdk
+    startCommand: mkdir -p /opt/render/project/src/data/workspace && FCC_CLAUDE_AGENT_SDK_PATH=/opt/render/project/src/node_modules/@anthropic-ai/claude-agent-sdk PATH=/opt/render/project/src/node_modules/.bin:$PATH uv run fcc-server
     healthCheckPath: /health
-    autoDeploy: false
+    autoDeploy: true
     disk:
-      name: fcc-data
+      name: fcc-data-v2
       mountPath: /opt/render/project/src/data
       sizeGB: 1
     envVars:
@@ -22,4 +22,12 @@ services:
       - key: FCC_OPEN_BROWSER
         value: "false"
       - key: FCC_ADMIN_AUTH_TOKEN
-        generateValue: true
+        sync: false
+      - key: ANTHROPIC_AUTH_TOKEN
+        sync: false
+      - key: PROXY_AUTH_ENABLED
+        value: "true"
+      - key: NVIDIA_NIM_API_KEY
+        sync: false
+      - key: MODEL
+        value: nvidia_nim/nvidia/nemotron-3-super-120b-a12b
