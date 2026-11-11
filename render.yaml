@@ -29,5 +29,3 @@ services:
         value: "true"
       - key: NVIDIA_NIM_API_KEY
         sync: false
-      - key: MODEL
-        value: nvidia_nim/nvidia/nemotron-3-super-120b-a12b

@@ -31,7 +31,13 @@ from free_claude_code.config.provider_catalog import (
 from free_claude_code.core.json_types import JsonObject, JsonValue
 from free_claude_code.core.version import package_version
 
-from .admin_security import require_loopback_admin
+from .admin_security import (
+    ADMIN_SESSION_COOKIE,
+    ADMIN_SESSION_MAX_AGE,
+    is_admin_authenticated,
+    is_valid_admin_token,
+    require_loopback_admin,
+)
 from .dependencies import get_services
 from .ports import ApiServices
 
@@ -86,6 +92,10 @@ class ConnectedAccountLoginPayload(BaseModel):
     mode: ConnectedAccountLoginMode | None = None
 
 
+class AdminLoginPayload(BaseModel):
+    token: str = Field(min_length=1, max_length=512)
+
+
 def _asset_path(filename: str) -> Path:
     asset_dir = PACKAGE_ASSETS_DIR if filename == "app-icon.svg" else STATIC_DIR
     path = asset_dir / filename
@@ -106,14 +116,52 @@ def admin_page_response() -> HTMLResponse:
     )
 
 
+def admin_login_response() -> HTMLResponse:
+    return HTMLResponse(_asset_path("login.html").read_text(encoding="utf-8"))
+
+
 @router.get("/admin", include_in_schema=False)
 @router.get("/admin/model_config", include_in_schema=False)
 @router.get("/admin/messaging", include_in_schema=False)
 @router.get("/admin/integrations", include_in_schema=False)
 @router.get("/admin/usage", include_in_schema=False)
 def admin_page(request: Request):
-    require_loopback_admin(request)
+    if not is_admin_authenticated(request):
+        return admin_login_response()
     return admin_page_response()
+
+
+@router.get("/admin/login", include_in_schema=False)
+def admin_login_page():
+    return admin_login_response()
+
+
+@router.post("/admin/api/auth/login")
+def admin_login(payload: AdminLoginPayload, response: Response):
+    if not is_valid_admin_token(payload.token):
+        raise HTTPException(status_code=401, detail="Token do Admin inválido.")
+    response.set_cookie(
+        key=ADMIN_SESSION_COOKIE,
+        value=payload.token.strip(),
+        max_age=ADMIN_SESSION_MAX_AGE,
+        path="/admin",
+        secure=True,
+        httponly=True,
+        samesite="strict",
+    )
+    return {"authenticated": True}
+
+
+@router.post("/admin/api/auth/logout")
+def admin_logout(response: Response):
+    response.delete_cookie(
+        ADMIN_SESSION_COOKIE,
+        path="/admin",
+        secure=True,
+        httponly=True,
+        samesite="strict",
+    )
+    return {"authenticated": False}
 
 
 @router.get("/admin/assets/{version}/{filename:path}", include_in_schema=False)

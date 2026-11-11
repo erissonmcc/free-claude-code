@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#09090b" />
+    <title>Entrar no Admin · FCC</title>
+    <style>
+      :root { color-scheme: dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #09090b; color: #f4f4f5; }
+      * { box-sizing: border-box; }
+      body { min-height: 100dvh; margin: 0; display: grid; place-items: center; padding: 24px; }
+      main { width: min(100%, 420px); padding: 28px; border: 1px solid #333338; border-radius: 24px; background: #18181b; box-shadow: 0 24px 80px #0008; }
+      .mark { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 14px; background: #27272a; color: #93c5fd; font-weight: 750; letter-spacing: -.06em; }
+      h1 { margin: 22px 0 8px; font-size: 25px; letter-spacing: -.03em; }
+      p { margin: 0; color: #a1a1aa; line-height: 1.5; }
+      label { display: block; margin: 24px 0 8px; font-size: 14px; color: #d4d4d8; }
+      input { width: 100%; min-height: 52px; padding: 0 14px; border: 1px solid #3f3f46; border-radius: 14px; background: #09090b; color: #fafafa; font-size: 16px; outline: none; }
+      input:focus { border-color: #60a5fa; box-shadow: 0 0 0 3px #3b82f633; }
+      button { width: 100%; min-height: 52px; margin-top: 16px; border: 0; border-radius: 14px; background: #3b82f6; color: white; font-size: 16px; font-weight: 650; }
+      button:disabled { opacity: .65; }
+      [role="alert"] { min-height: 22px; margin-top: 12px; color: #fca5a5; font-size: 14px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="mark" aria-hidden="true">FCC</div>
+      <h1>Acessar o Admin</h1>
+      <p>Entre com o token de administração para configurar provedores e modelos.</p>
+      <form id="loginForm">
+        <label for="token">Token do Admin</label>
+        <input id="token" name="token" type="password" autocomplete="off" required />
+        <button id="submit" type="submit">Entrar</button>
+        <div id="error" role="alert" aria-live="polite"></div>
+      </form>
+    </main>
+    <script>
+      const form = document.getElementById("loginForm");
+      const input = document.getElementById("token");
+      const button = document.getElementById("submit");
+      const error = document.getElementById("error");
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        button.disabled = true;
+        error.textContent = "";
+        try {
+          const response = await fetch("/admin/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "same-origin",
+            body: JSON.stringify({ token: input.value }),
+          });
+          input.value = "";
+          if (!response.ok) throw new Error(response.status === 401 ? "Token inválido." : "Não foi possível entrar agora.");
+          window.location.assign("/admin");
+        } catch (failure) {
+          error.textContent = failure.message || "Falha de conexão.";
+          button.disabled = false;
+          input.focus();
+        }
+      });
+    </script>
+  </body>
+</html>

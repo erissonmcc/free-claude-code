@@ -7,6 +7,9 @@ from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request
 
+ADMIN_SESSION_COOKIE = "fcc_admin_session"
+ADMIN_SESSION_MAX_AGE = 12 * 60 * 60
+
 
 def _is_loopback_host(host: str | None) -> bool:
     if host is None:
@@ -57,21 +60,29 @@ def _authority_is_local(authority: str | None) -> bool:
     )
 
 
-def require_loopback_admin(request: Request) -> None:
-    """Allow local Admin access or authenticated access to a hosted instance."""
+def is_valid_admin_token(token: str) -> bool:
+    expected = os.environ.get("FCC_ADMIN_AUTH_TOKEN", "").strip()
+    return bool(expected) and secrets.compare_digest(token.strip(), expected)
 
+
+def is_admin_authenticated(request: Request) -> bool:
+    """Allow local Admin access or a valid hosted Admin credential."""
     client_host = request.client.host if request.client else None
     if _is_loopback_host(client_host) and _authority_is_local(
         request.headers.get("host")
     ) and _origin_is_local(request.headers.get("origin")):
-        return
+        return True
 
-    expected = os.environ.get("FCC_ADMIN_AUTH_TOKEN", "").strip()
+    if not os.environ.get("FCC_ADMIN_AUTH_TOKEN", "").strip():
+        return False
     authorization = request.headers.get("authorization", "")
     scheme, _, supplied = authorization.partition(" ")
-    if (
-        not expected
-        or scheme.casefold() != "bearer"
-        or not secrets.compare_digest(supplied.strip(), expected)
-    ):
+    return (scheme.casefold() == "bearer" and is_valid_admin_token(supplied)) or (
+        is_valid_admin_token(request.cookies.get(ADMIN_SESSION_COOKIE, ""))
+    )
+
+
+def require_loopback_admin(request: Request) -> None:
+    """Allow local Admin access or authenticated access to a hosted instance."""
+    if not is_admin_authenticated(request):
         raise HTTPException(status_code=401, detail="Admin authentication required")

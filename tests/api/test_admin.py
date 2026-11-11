@@ -165,13 +165,15 @@ def _catalog_proxy_env_keys() -> tuple[str, ...]:
 @pytest.mark.parametrize(
     "path", ["/admin", "/admin/model_config", "/admin/messaging", "/admin/integrations"]
 )
-def test_admin_page_is_loopback_only(monkeypatch, tmp_path, path):
+def test_remote_admin_page_displays_login(monkeypatch, tmp_path, path):
     _set_home(monkeypatch, tmp_path)
     app = create_test_app()
 
     assert _local_client(app).get(path).status_code == 200
     remote_client = TestClient(app, client=("203.0.113.10", 50000))
-    assert remote_client.get(path).status_code == 403
+    remote_response = remote_client.get(path)
+    assert remote_response.status_code == 200
+    assert "Acessar o Admin" in remote_response.text
 
 
 def test_admin_page_uses_installed_version(monkeypatch, tmp_path):
@@ -284,7 +286,7 @@ def test_admin_responses_are_never_cached(monkeypatch, tmp_path, path):
 @pytest.mark.parametrize(
     ("path", "client_host", "expected_status"),
     (
-        ("/admin", "203.0.113.10", 403),
+        ("/admin", "203.0.113.10", 200),
         ("/admin/assets/admin.js", "127.0.0.1", 404),
         (
             f"/admin/assets/{package_version()}.stale/admin.js",
@@ -299,7 +301,7 @@ def test_admin_responses_are_never_cached(monkeypatch, tmp_path, path):
         (
             f"/admin/assets/{package_version()}/admin.js",
             "203.0.113.10",
-            403,
+            401,
         ),
     ),
 )
