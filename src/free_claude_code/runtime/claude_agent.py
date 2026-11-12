@@ -88,7 +88,7 @@ def _sdk_permission_mode(mode: CodeMode) -> str:
     return {
         "config": "default",
         "ask": "default",
-        "auto_review": "default",
+        "auto_review": "auto",
         "full_access": "bypassPermissions",
     }[mode]
 

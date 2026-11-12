@@ -11,6 +11,21 @@ from free_claude_code.runtime.claude_agent import ClaudeAgentConnection
 
 
 @pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("config", "default"),
+        ("ask", "default"),
+        ("auto_review", "auto"),
+        ("full_access", "bypassPermissions"),
+    ],
+)
+def test_sdk_permission_mode_matches_the_selected_session_mode(mode, expected):
+    from free_claude_code.runtime.claude_agent import _sdk_permission_mode
+
+    assert _sdk_permission_mode(mode) == expected
+
+
+@pytest.mark.parametrize(
     ("text", "expected"),
     [
         ("/fast olá", ("olá", True)),
