@@ -53,8 +53,14 @@ def to_context_request(
         stable_prefix_digest=context_digest(prefix),
         scope_key=scope_key,
         stable_message_count=stable_message_count,
+        # The connected OpenAI/Codex provider deliberately strips
+        # previous_response_id before the upstream request and sends the full
+        # input history. In that route the history is not hidden remotely and
+        # FCC can safely compact it. Other Responses providers may rely on the
+        # remote response chain, so keep treating their history as opaque.
         opaque_remote_context=(
             protocol == "responses"
+            and provider.lower() != "openai"
             and isinstance(body.get("previous_response_id"), str)
         ),
     )

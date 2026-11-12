@@ -568,19 +568,23 @@ async def _summarize_in_bounded_batches(
 ) -> tuple[StructuredSummary, int]:
     summaries: list[StructuredSummary] = []
     calls = 0
+    # Reserve 25% of the summarizer's source allowance for prompt framing,
+    # instructions, and token-estimation variance.
+    batch_limit = max(1024, max_source_chars * 3 // 4)
     batches: list[list[MessageGroup]] = []
     current: list[MessageGroup] = []
     current_chars = 2
-    for group in groups:
-        group_chars = len(json.dumps(group.messages, ensure_ascii=False, default=str))
-        if group_chars > max_source_chars:
-            raise ValueError("one complete message group exceeds the summary input limit")
-        if current and current_chars + group_chars > max_source_chars:
-            batches.append(current)
-            current = []
-            current_chars = 2
-        current.append(group)
-        current_chars += group_chars + 1
+    for original_group in groups:
+        # Keep provider transactions atomic in retained history, but allow the
+        # summary view to batch large transactions in bounded fragments.
+        for group in _summary_fragments(original_group, batch_limit):
+            group_chars = len(json.dumps(group.messages, ensure_ascii=False, default=str))
+            if current and current_chars + group_chars > batch_limit:
+                batches.append(current)
+                current = []
+                current_chars = 2
+            current.append(group)
+            current_chars += group_chars + 1
     if current:
         batches.append(current)
 
@@ -605,6 +609,35 @@ async def _summarize_in_bounded_batches(
         calls=calls,
     )
 
+
+
+def _summary_fragments(group: MessageGroup, max_source_chars: int) -> tuple[MessageGroup, ...]:
+    """Bound the summary representation without splitting retained history."""
+    serialized = json.dumps(group.messages, ensure_ascii=False, default=str)
+    if len(serialized) <= max_source_chars:
+        return (group,)
+    # Reserve room for JSON framing and the synthetic fragment label.
+    chunk_size = max(256, max_source_chars - 1024)
+    overlap = min(256, chunk_size // 8)
+    step = max(1, chunk_size - overlap)
+    chunks = [serialized[start : start + chunk_size] for start in range(0, len(serialized), step)]
+    total = len(chunks)
+    return tuple(
+        MessageGroup(
+            messages=({
+                "role": "assistant",
+                "content": (
+                    f"[Summary-only fragment {index + 1}/{total} of oversized "
+                    f"{group.kind} group; original transaction remains intact. "
+                    "Serialized excerpt, not a standalone message.]\n" + chunk
+                ),
+            },),
+            kind="summary_fragment",
+            complete=True,
+            pinned=False,
+        )
+        for index, chunk in enumerate(chunks)
+    )
 
 async def _consolidate_summary(
     summary: StructuredSummary,
@@ -839,7 +872,7 @@ class ContextCompactor:
                     summary_generator=summary_generator,
                     target_tokens=self._policy.summary_target_tokens,
                     max_source_chars=max(
-                        4096, self._policy.max_tool_result_tokens * 2 + 2048
+                        4096, self._policy.max_tool_result_tokens * 4
                     ),
                     max_levels=self._policy.max_compaction_passes,
                 )
@@ -853,12 +886,17 @@ class ContextCompactor:
                     summary_generator=summary_generator,
                     target_tokens=self._policy.summary_target_tokens,
                     max_source_chars=max(
-                        4096, self._policy.max_tool_result_tokens * 2 + 2048
+                        4096, self._policy.max_tool_result_tokens * 4
                     ),
                     max_levels=self._policy.max_compaction_passes,
                 )
                 internal_calls += consolidation_calls
-            except Exception:
+            except Exception as error:
+                from loguru import logger
+
+                logger.opt(exception=error).warning(
+                    "FCC context summary failed; refusing unsafe compaction"
+                )
                 return ContextCompactionResult(
                     current_groups,
                     None,

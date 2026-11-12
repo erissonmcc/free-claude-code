@@ -12,7 +12,83 @@ from free_claude_code.application.context_manager import (
     StructuredSummary,
     deduplicate_tool_outputs,
     group_message_transactions,
+    _summarize_in_bounded_batches,
+    _summary_fragments,
 )
+
+
+@pytest.mark.asyncio
+async def test_summary_batch_accepts_single_message_within_internal_prompt_limit():
+    # A tool result may be capped at 20k tokens (~80k chars), so the batch
+    # character guard must match the internal summarizer's 4x character cap.
+    groups = (MessageGroup(messages=({"role": "tool", "content": "x" * 50000},)),)
+
+    class Generator:
+        calls = 0
+
+        async def summarize(self, source_groups, *, target_tokens):
+            self.calls += 1
+            assert source_groups == groups
+            return StructuredSummary(current_task="large result summarized")
+
+    generator = Generator()
+    summary, calls = await _summarize_in_bounded_batches(
+        groups,
+        summary_generator=generator,
+        target_tokens=2048,
+        max_source_chars=20000 * 4,
+        max_levels=0,
+    )
+
+    assert summary.current_task == "large result summarized"
+    assert calls == 1
+    assert generator.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_summary_batches_fragment_oversized_atomic_group_without_mutating_it():
+    original = MessageGroup(
+        messages=(
+            {"role": "assistant", "tool_calls": [{"id": "call-1", "type": "function"}]},
+            {"role": "tool", "tool_call_id": "call-1", "content": "x" * 12000},
+        ),
+        kind="tool",
+        complete=True,
+    )
+
+    class Generator:
+        batches = []
+
+        async def summarize(self, source_groups, *, target_tokens):
+            self.batches.append(source_groups)
+            encoded = __import__("json").dumps(
+                [group.messages for group in source_groups], ensure_ascii=False
+            )
+            assert len(encoded) <= 4096
+            return StructuredSummary(current_task="transaction summarized")
+
+    generator = Generator()
+    summary, calls = await _summarize_in_bounded_batches(
+        (original,),
+        summary_generator=generator,
+        target_tokens=256,
+        max_source_chars=4096,
+        max_levels=0,
+    )
+
+    assert summary.current_task == "transaction summarized"
+    assert calls == len(generator.batches)
+    assert calls > 1
+    assert all(
+        group.kind == "summary_fragment"
+        for batch in generator.batches
+        for group in batch
+    )
+    # Fragmentation is summary-only: the source transaction remains intact.
+    assert original.kind == "tool"
+    assert original.complete is True
+    assert len(original.messages) == 2
+    assert original.messages[1]["content"] == "x" * 12000
 
 
 def test_short_history_is_returned_unchanged_and_keeps_estimate_separate_from_usage():

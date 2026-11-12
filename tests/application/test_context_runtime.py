@@ -187,6 +187,9 @@ async def test_large_responses_history_is_summarized_in_bounded_batches(monkeypa
     monkeypatch.setattr(runtime, "_summarize", summarize)
     body = {
         "model": "model-a",
+        # The connected Codex provider strips this field upstream and sends
+        # the complete input list, so FCC must still compact the visible history.
+        "previous_response_id": "resp_previous",
         "input": [
             {"role": "user", "content": f"old detail {index} " + "x" * 2400}
             for index in range(60)

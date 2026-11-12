@@ -269,7 +269,7 @@ def test_responses_previous_response_id_marks_hidden_history_as_opaque():
         "input": [{"type": "message", "role": "user", "content": "new turn"}],
     }
 
-    request = responses.to_context_request(body, "openai", "model-a")
+    request = responses.to_context_request(body, "openai_api", "model-a")
     decision = ContextCompactionResult(
         groups=request.groups,
         summary=None,
@@ -282,6 +282,22 @@ def test_responses_previous_response_id_marks_hidden_history_as_opaque():
     assert request.opaque_remote_context is True
     assert output["previous_response_id"] == "resp_previous"
     assert output["input"] == body["input"]
+
+
+def test_connected_openai_codex_full_input_is_compactable_with_previous_response_id():
+    body = {
+        "previous_response_id": "resp_previous",
+        "input": [
+            {"type": "message", "role": "user", "content": "old turn"},
+            {"type": "message", "role": "assistant", "content": "old answer"},
+            {"type": "message", "role": "user", "content": "new turn"},
+        ],
+    }
+
+    request = responses.to_context_request(body, "openai", "model-a")
+
+    assert request.opaque_remote_context is False
+    assert all(not group.pinned for group in request.groups)
 
 
 def test_responses_string_input_is_kept_opaque_and_unchanged():
