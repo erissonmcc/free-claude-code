@@ -6,6 +6,7 @@ class ClaudeTextStream {
   constructor() {
     this.messageId = null;
     this.blocks = new Map();
+    this.assistantBlockIndex = 0;
   }
 
   frame(block) {
@@ -19,6 +20,7 @@ class ClaudeTextStream {
       if (event.type === 'message_start') {
         this.messageId = event.message.id;
         this.blocks.clear();
+        this.assistantBlockIndex = 0;
       } else if (event.type === 'content_block_start') {
         if (event.content_block.type === 'text') {
           this.blocks.set(event.index, {
@@ -43,10 +45,13 @@ class ClaudeTextStream {
         }
       }
     } else if (message.type === 'assistant') {
-      for (const [index, content] of (message.message.content || []).entries()) {
+      const topLevel = !message.parent_tool_use_id && message.message.id === this.messageId;
+      // SDK confirmations carry completed blocks, not the full message content.
+      // Count thinking/tool blocks too so their original stream indexes survive.
+      for (const [offset, content] of (message.message.content || []).entries()) {
+        const index = topLevel ? this.assistantBlockIndex++ : offset;
         if (content.type !== 'text') continue;
-        const streamed = !message.parent_tool_use_id && message.message.id === this.messageId
-          ? this.blocks.get(index) : null;
+        const streamed = topLevel ? this.blocks.get(index) : null;
         if (streamed) {
           if (streamed.complete && streamed.text === content.text) continue;
           streamed.text = content.text;

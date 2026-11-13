@@ -104,3 +104,30 @@ test('turn completion finalizes cut-off text without dropping it', () => {
   assert.equal(final.text, 'Parcial');
   assert.equal(final.complete, true);
 });
+
+test('single-block SDK confirmations keep the stream index after thinking', () => {
+  const stream = new ClaudeTextStream();
+  start(stream);
+  stream.accept({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } } });
+  stream.accept({ type: 'assistant', uuid: 'thinking', message: { id: 'message', content: [{ type: 'thinking', thinking: 'Vou verificar' }] } });
+  block(stream, 1);
+  const first = delta(stream, 1, 'Vou consultar o horário.')[0];
+  stream.accept({ type: 'stream_event', event: { type: 'content_block_stop', index: 1 } });
+  assert.deepEqual(stream.accept({ type: 'assistant', uuid: 'text', message: { id: 'message', content: [{ type: 'text', text: first.text }] } }), []);
+});
+
+test('successive single-block confirmations do not overwrite or duplicate text', () => {
+  const stream = new ClaudeTextStream();
+  start(stream);
+  const entries = new Map();
+  for (const index of [0, 1]) {
+    block(stream, index);
+    const text = index === 0 ? 'Primeiro' : 'Segundo';
+    for (const frame of delta(stream, index, text)) entries.set(frame.id, frame);
+    for (const frame of stream.accept({ type: 'stream_event', event: { type: 'content_block_stop', index } })) entries.set(frame.id, frame);
+    for (const frame of stream.accept({ type: 'assistant', uuid: `block-${index}`, message: { id: 'message', content: [{ type: 'text', text }] } })) entries.set(frame.id, frame);
+  }
+  assert.deepEqual([...entries.keys()], ['text:message:0', 'text:message:1']);
+  assert.equal(entries.size, 2);
+  assert.deepEqual([...entries.values()].map(frame => frame.text), ['Primeiro', 'Segundo']);
+});
