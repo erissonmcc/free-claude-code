@@ -1027,3 +1027,28 @@ def drop_messaging_schema(connection):
         "messaging_legacy_import",
     ):
         connection.execute(f"DROP TABLE {table}")
+
+
+@pytest.mark.asyncio
+async def test_fork_copies_history_through_run_and_item_without_touching_source(store):
+    source = await store.create(CodeSession(id="source", cwd="/work", model="p/m", harness="claude"))
+    def seed(connection):
+        for ordinal in (1, 2, 3):
+            run = CodeRun(id=f"r{ordinal}", session_id=source.id, text=f"q{ordinal}", model=source.model, ordinal=ordinal, status="completed")
+            code_store_module._insert(connection, "code_runs", run)
+            for sequence, kind in ((1, "user"), (2, "text"), (3, "text")):
+                code_store_module._insert(connection, "code_items", CodeItem(id=f"i{ordinal}-{sequence}", session_id=source.id, run_id=run.id, sequence=ordinal * 10 + sequence, kind=kind, text=f"{ordinal}:{sequence}", complete=True, native_item_id=f"text:msg{ordinal}:{sequence}"))
+    await store.database.run(seed)
+    fork = CodeSession(id="fork", cwd="/work", model="p/m", harness="claude", native_thread_id="independent")
+    await store.fork(source.id, source.revision, fork, "i2-2")
+    items = await store.items(fork.id, None, None)
+    assert [item.text for item in items] == ["1:1", "1:2", "1:3", "2:1", "2:2"]
+    assert all(item.session_id == fork.id and not item.id.startswith("i") for item in items)
+    assert len(await store.items(source.id, None, None)) == 9
+    assert len(await store.runs(fork.id)) == 2
+    assert all(run.session_id == fork.id for run in await store.runs(fork.id))
+    assert (await store.get_session(source.id)) == source
+    with pytest.raises(CodeConflictError):
+        await store.fork(source.id, 999, fork.model_copy(update={"id": "stale"}), "i2-2")
+    with pytest.raises(Exception):
+        await store.get_session("stale")

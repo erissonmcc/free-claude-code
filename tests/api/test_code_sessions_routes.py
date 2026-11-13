@@ -793,3 +793,21 @@ async def test_folder_picker_only_opens_on_an_authorized_explicit_post(
     assert (await client.get("/admin/api/code/folder-picker")).status_code == 405
     assert (await client.get("/admin/code")).status_code == 200
     assert (await client.get("/admin/api/code/bootstrap")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_fork_route_returns_new_session_and_validates_revision(code_api, monkeypatch):
+    from unittest.mock import AsyncMock
+    from free_claude_code.application.code_sessions.models import CodeSession
+    client, code, _, folder, _ = code_api
+    result = CodeSession(id=str(uuid.uuid4()), cwd=str(folder), model="p/m", harness="claude")
+    fork = AsyncMock(return_value=result)
+    monkeypatch.setattr(code, "fork_session", fork)
+    payload = {"session_id":result.id, "item_id":"answer", "expected_revision":2}
+    response = await client.post('/admin/api/code/sessions/source/fork', json=payload)
+    assert response.status_code == 201
+    assert response.json()['id'] == result.id
+    fork.assert_awaited_once_with('source', result.id, 'answer', 2)
+    response = await client.post('/admin/api/code/sessions/source/fork', json={**payload, 'expected_revision':0})
+    assert response.status_code == 422
+    assert fork.await_count == 1

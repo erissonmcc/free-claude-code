@@ -39,6 +39,12 @@ async function readInput() {
 
 async function main() {
   const request = await readInput();
+  if (request.type === 'fork') {
+    const {forkAtMessage} = require('./claude_session_fork.cjs');
+    const result = await forkAtMessage(require(sdkPath), request);
+    send({type: 'fork', sessionId: result.sessionId});
+    return;
+  }
   const phoneServer = createPhoneToolServer({ createSdkMcpServer, tool, z, rpc: deviceTools });
   const options = {
     cwd: request.cwd,
@@ -147,4 +153,4 @@ async function main() {
   }
 }
 
-main();
+main().catch(error => { send({type: 'error', error: error.message}); process.exitCode = 1; });

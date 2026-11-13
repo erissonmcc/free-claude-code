@@ -236,6 +236,28 @@ class ClaudeAgentConnection:
         self._new_thread = False
         return NativeThread(thread_id, permission_defaults={})
 
+    async def fork_thread(self, thread_id: str, item_id: str, title: str) -> NativeThread:
+        worker = str(Path(__file__).with_name("claude_agent_worker.cjs"))
+        process = await asyncio.create_subprocess_exec(
+            shutil.which("node") or "node", worker, cwd=self._cwd, env=self._env,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            output, error = await asyncio.wait_for(process.communicate(json.dumps({
+                "type": "fork", "sessionId": thread_id, "itemId": item_id,
+                "cwd": self._cwd, "title": title,
+            }).encode() + b"\n"), timeout=30)
+            messages = [json.loads(line) for line in output.splitlines() if line.strip()]
+            result = next((message for message in messages if message.get("type") == "fork"), None)
+            if process.returncode or result is None:
+                detail = next((message.get("error") for message in messages if message.get("type") == "error"), "SDK não retornou a ramificação.")
+                raise CodeUnavailableError(str(detail))
+            return NativeThread(str(uuid.UUID(result["sessionId"])), permission_defaults={})
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+
     async def read_thread(self, thread_id: str) -> NativeThread:
         return NativeThread(thread_id)
 

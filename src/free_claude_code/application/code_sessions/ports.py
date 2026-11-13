@@ -36,6 +36,8 @@ class HarnessConnection(Protocol):
 
     async def resume_thread(self, thread_id: str) -> NativeThread: ...
 
+    async def fork_thread(self, thread_id: str, item_id: str, title: str) -> NativeThread: ...
+
     async def read_thread(self, thread_id: str) -> NativeThread: ...
 
     async def start_turn(
@@ -88,6 +90,8 @@ class HarnessFactory(Protocol):
 
 
 class CodeStore(Protocol):
+    async def fork(self, source_id: str, expected_revision: int, session: CodeSession, through_item_id: str) -> CodeSession: ...
+
     async def execution_seed(self, session_id: str) -> CodeExecutionSeed: ...
 
     async def read_history(
@@ -179,6 +183,8 @@ class CodeStore(Protocol):
 
 
 class CodeApplicationPort(Protocol):
+    async def fork_session(self, session_id: str, new_session_id: str, item_id: str, revision: int) -> CodeSession: ...
+
     @property
     def epoch(self) -> str: ...
 

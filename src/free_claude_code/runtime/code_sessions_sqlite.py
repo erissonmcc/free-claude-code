@@ -3,6 +3,7 @@
 import asyncio
 import json
 import sqlite3
+import uuid
 from collections.abc import Callable, Sequence
 
 from free_claude_code.application.code_sessions.models import (
@@ -452,6 +453,30 @@ class SQLiteCodeStore:
             _insert(connection, "code_sessions", session)
             return session
 
+        return await self._run(operation, write=True)
+
+    async def fork(self, source_id: str, expected_revision: int, session: CodeSession, through_item_id: str) -> CodeSession:
+        def operation(connection: sqlite3.Connection) -> CodeSession:
+            source = _session(connection, source_id)
+            if source.revision != expected_revision:
+                raise CodeConflictError("A conversa mudou durante a ramificação. Tente novamente.")
+            _idle(connection, source_id)
+            endpoint = connection.execute("SELECT i.*, r.ordinal AS run_ordinal FROM code_items i JOIN code_runs r ON (r.session_id, r.id)=(i.session_id,i.run_id) WHERE i.session_id=? AND i.id=?", (source_id, through_item_id)).fetchone()
+            if endpoint is None or endpoint["kind"] != "text" or not endpoint["complete"]:
+                raise CodeConflictError("Selecione uma resposta concluída para ramificar.")
+            _insert(connection, "code_sessions", session)
+            rows = connection.execute("SELECT i.* FROM code_items i JOIN code_runs r ON (r.session_id,r.id)=(i.session_id,i.run_id) WHERE i.session_id=? AND (r.ordinal,i.sequence)<=(?,?) ORDER BY r.ordinal,i.sequence", (source_id, endpoint["run_ordinal"], endpoint["sequence"])).fetchall()
+            run_ids = dict.fromkeys(row["run_id"] for row in rows)
+            remapped = {run_id: str(uuid.uuid4()) for run_id in run_ids}
+            for run_id, new_id in remapped.items():
+                row = connection.execute("SELECT * FROM code_runs WHERE session_id=? AND id=?", (source_id, run_id)).fetchone()
+                run = _record(CodeRun, row)
+                _insert(connection, "code_runs", run.model_copy(update={"id": new_id, "session_id": session.id, "native_turn_id": None}))
+            for row in rows:
+                item = _record(CodeItem, row)
+                _insert(connection, "code_items", item.model_copy(update={"id": str(uuid.uuid4()), "session_id": session.id,
+                    "run_id": remapped[item.run_id], "native_turn_id": None}))
+            return session
         return await self._run(operation, write=True)
 
     async def get_session(self, session_id: str) -> CodeSession:

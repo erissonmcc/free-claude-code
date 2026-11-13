@@ -2508,3 +2508,27 @@ async def test_cancelled_close_waiter_does_not_cancel_owned_shutdown(code, monke
         release.set()
         await service.close()
         await close_code_database(service)
+
+
+@pytest.mark.asyncio
+async def test_fork_uses_native_selected_message_and_keeps_original_session(code, monkeypatch):
+    from free_claude_code.application.code_sessions.models import NativeThread
+    service, harness, directory = code
+    service._harnesses["claude"] = harness
+    source = await service._store.create(CodeSession(id=new_id(), cwd=str(directory), model=harness.model, harness="claude", native_thread_id="source-thread", native_permission_defaults={}, native_may_have_input=True))
+    run = CodeRun(id=new_id(), session_id=source.id, text="question", model=source.model)
+    user = CodeItem(id=run.id, run_id=run.id, session_id=source.id, sequence=1, kind="user", text=run.text, complete=True)
+    source, run = await service._store.admit_run(source, run, user, source.revision)
+    answer = CodeItem(id=new_id(), run_id=run.id, session_id=source.id, sequence=2, kind="text", text="answer", complete=True, native_item_id="text:message:0")
+    await service._store.save_progress(source, source.revision, run=run.model_copy(update={"status":"completed"}), items=(answer,))
+    connection = SimpleNamespace(fork_thread=AsyncMock(return_value=NativeThread("fork-thread", permission_defaults={})), close=AsyncMock())
+    monkeypatch.setattr(harness, "open_history", AsyncMock(return_value=connection))
+    fork = await service.fork_session(source.id, new_id(), answer.id, source.revision)
+    connection.fork_thread.assert_awaited_once_with("source-thread", answer.native_item_id, source.title)
+    connection.close.assert_awaited_once()
+    assert fork.native_thread_id == "fork-thread"
+    assert (await service._store.get_session(source.id)).native_thread_id == "source-thread"
+    assert [item.text for item in (await service.get_detail(fork.id)).items] == ["question", "answer"]
+    with pytest.raises(CodeConflictError):
+        await service.fork_session(source.id, new_id(), answer.id, 999)
+    assert connection.fork_thread.await_count == 1

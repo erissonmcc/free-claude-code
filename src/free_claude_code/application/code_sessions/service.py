@@ -340,6 +340,37 @@ class CodeService:
             self._publish(owner, "session.updated")
         return session
 
+    async def fork_session(self, session_id: str, new_session_id: str, item_id: str, revision: int) -> CodeSession:
+        return await self._command(self._fork(session_id, new_session_id, item_id, revision))
+
+    async def _fork(self, session_id: str, new_session_id: str, item_id: str, revision: int) -> CodeSession:
+        _validate_id(new_session_id)
+        owner = await self._owner(session_id)
+        async with self._locked(owner):
+            self._editable(owner, revision)
+            if owner.state.busy or owner.state.pending:
+                raise CodeConflictError("Aguarde a conversa ficar ociosa para ramificar.")
+            source = owner.state.session
+            item = await self._store.get_item(session_id, item_id)
+            if item is None or item.kind != "text" or not item.complete or not item.native_item_id:
+                raise CodeValidationError("Esta resposta não tem um ponto de ramificação nativo disponível.")
+            if source.harness != "claude" or not source.native_thread_id:
+                raise CodeValidationError("Ramificação disponível apenas para conversas Claude com histórico nativo.")
+            connection = await self._factory(source.harness).open_history(source.cwd, lambda event: self._event(owner, event))
+            try:
+                native = await connection.fork_thread(source.native_thread_id, item.native_item_id, source.title)
+            finally:
+                await connection.close()
+            session = CodeSession(id=new_session_id, cwd=source.cwd, model=source.model,
+                reasoning_effort=source.reasoning_effort, mode=source.mode, harness=source.harness,
+                title=source.title, auto_title=False, native_thread_id=native.id,
+                native_permission_defaults={}, native_may_have_input=True)
+            session = await self._store.fork(session_id, revision, session, item_id)
+        fork_owner = await self._owner(session.id)
+        async with self._locked(fork_owner):
+            self._publish(fork_owner, "session.updated")
+        return session
+
     async def list_sessions(
         self, cursor: tuple[int, str] | None = None, limit: int = 25, query: str = ""
     ) -> CodePage:

@@ -50,6 +50,12 @@ class CreatePayload(CommandPayload):
     harness: Literal["codex", "claude"] = "codex"
 
 
+class ForkPayload(CommandPayload):
+    session_id: str
+    item_id: str
+    expected_revision: int = Field(gt=0)
+
+
 class FolderPickerPayload(CommandPayload):
     initial_path: str | None = Field(default=None, max_length=4096)
 
@@ -198,6 +204,11 @@ async def create(
             payload.session_id, payload.cwd, payload.harness
         )
     )
+
+
+@router.post("/admin/api/code/sessions/{session_id}/fork", status_code=201)
+async def fork(session_id: str, payload: ForkPayload, services: ApiServices = Depends(get_services)) -> JsonObject:
+    return _session_payload(await _code(services).fork_session(session_id, payload.session_id, payload.item_id, payload.expected_revision))
 
 
 @router.get("/admin/api/code/sessions/{session_id}")
