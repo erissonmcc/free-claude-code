@@ -455,6 +455,30 @@ class SQLiteCodeStore:
 
         return await self._run(operation, write=True)
 
+    async def regenerate(self, session: CodeSession, expected_revision: int, item_id: str, text: str) -> CodeRun:
+        def operation(connection: sqlite3.Connection) -> CodeRun:
+            previous = _session(connection, session.id)
+            if previous.revision != expected_revision:
+                raise CodeConflictError("A conversa mudou. Atualize antes de tentar novamente.")
+            _idle(connection, session.id)
+            row = connection.execute("SELECT * FROM code_items WHERE session_id=? AND id=?", (session.id, item_id)).fetchone()
+            if row is None or row["kind"] != "text" or not row["complete"]:
+                raise CodeConflictError("Selecione uma resposta concluída.")
+            run = _record(CodeRun, connection.execute("SELECT * FROM code_runs WHERE session_id=? AND id=?", (session.id, row["run_id"])).fetchone())
+            # Keep the original user row and everything preceding the selected answer.
+            connection.execute("DELETE FROM code_items WHERE session_id=? AND sequence>=?", (session.id, row["sequence"]))
+            connection.execute("DELETE FROM code_runs WHERE session_id=? AND ordinal>?", (session.id, run.ordinal))
+            restarted = run.model_copy(update={"text": text, "status": "preparing", "model": session.model,
+                "reasoning_effort": session.reasoning_effort, "mode": session.mode, "native_turn_id": None,
+                "submission_started": False, "stop_requested": False, "error": None, "error_details": {},
+                "finished_at": None, "consumed_tokens": None, "created_at": now_ms()})
+            values = _values(restarted)
+            connection.execute("UPDATE code_runs SET " + ",".join(f"{key}=?" for key in values if key not in {"session_id", "id"}) + " WHERE session_id=? AND id=?",
+                tuple(value for key,value in values.items() if key not in {"session_id","id"}) + (session.id, run.id))
+            _write_session(connection, session, expected_revision, settings=False)
+            return restarted
+        return await self._run(operation, write=True)
+
     async def fork(self, source_id: str, expected_revision: int, session: CodeSession, through_item_id: str) -> CodeSession:
         def operation(connection: sqlite3.Connection) -> CodeSession:
             source = _session(connection, source_id)

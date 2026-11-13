@@ -340,6 +340,45 @@ class CodeService:
             self._publish(owner, "session.updated")
         return session
 
+    async def regenerate(self, session_id: str, item_id: str, revision: int, search: bool = False) -> CodeRun:
+        return await self._command(self._regenerate(session_id, item_id, revision, search))
+
+    async def _regenerate(self, session_id: str, item_id: str, revision: int, search: bool) -> CodeRun:
+        owner = await self._owner(session_id)
+        async with self._locked(owner):
+            self._editable(owner, revision)
+            owner.state.check_can_send()
+            source = owner.state.session
+            item = await self._store.get_item(session_id, item_id)
+            if source.harness != "claude" or not source.native_thread_id or item is None or item.kind != "text" or not item.complete or not item.native_item_id:
+                raise CodeValidationError("Esta resposta não pode ser regenerada com segurança.")
+            original = await self._store.get_run(session_id, item.run_id)
+            if original is None:
+                raise CodeValidationError("A solicitação original não foi encontrada.")
+            selection = await self._factory(source.harness).prepare(source.model, source.reasoning_effort, source.mode)
+            connection = await self._factory(source.harness).open_history(source.cwd, lambda event: self._event(owner, event))
+            try:
+                native = await connection.fork_thread(source.native_thread_id, item.native_item_id, source.title, prompt=original.text)
+            finally:
+                await connection.close()
+            instruction = "\n\nPesquise na web antes de responder. Cite as fontes consultadas e seus links. Se não houver ferramenta de pesquisa disponível, informe essa limitação sem inventar fontes."
+            text = original.text.removesuffix(instruction) + (instruction if search else "")
+            updated = source.model_copy(update={"native_thread_id": native.id if native else None,
+                "native_permission_defaults": source.native_permission_defaults, "native_may_have_input": bool(native),
+                "context_used_tokens": None, "revision": source.revision + 1})
+            watermark = owner.state.next_sequence() - 1
+            run = await self._store.regenerate(updated, revision, item_id, text)
+            previous_connection = self._detach_connection_locked(owner)
+            seed = await self._store.execution_seed(session_id)
+            owner.state = SessionState(seed.session, seed.run, seed.items, seed.prompts, seed.runs, sequence=max(seed.sequence, watermark))
+            owner.loaded_thread_id = None
+            owner.finished = asyncio.Event()
+            self._publish(owner, "session.rewound", truncated_sequence=item.sequence)
+            owner.job = self._job(self._work(owner, run.id, selection))
+        if previous_connection is not None:
+            await previous_connection.close()
+        return run
+
     async def fork_session(self, session_id: str, new_session_id: str, item_id: str, revision: int) -> CodeSession:
         return await self._command(self._fork(session_id, new_session_id, item_id, revision))
 

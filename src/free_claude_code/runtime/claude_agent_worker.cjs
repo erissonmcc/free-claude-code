@@ -41,18 +41,19 @@ async function readInput() {
 async function main() {
   const request = await readInput();
   if (request.type === 'fork') {
-    const {forkAtMessage} = require('./claude_session_fork.cjs');
-    const result = await forkAtMessage(require(sdkPath), request);
+    const {forkAtMessage, forkBeforeTurn} = require('./claude_session_fork.cjs');
+    const result = await (request.rewind ? forkBeforeTurn : forkAtMessage)(require(sdkPath), request);
     send({type: 'fork', sessionId: result.sessionId});
     return;
   }
   const phoneServer = createPhoneToolServer({ createSdkMcpServer, tool, z, rpc: deviceTools });
   const playwright = process.env.FCC_PLAYWRIGHT_MCP === '1'
     ? await playwrightServer({
-        home: process.env.HOME || request.cwd,
         sessionId: request.sessionId,
         createConnection: require('@playwright/mcp').createConnection,
-        chromium: require('playwright').chromium,
+        gcloud: process.env.FCC_GCLOUD_BIN,
+        python: request.python,
+        env: process.env,
       })
     : undefined;
   const options = {
@@ -63,8 +64,8 @@ async function main() {
     permissionMode: request.permissionMode,
     settingSources: ['user', 'project', 'local'],
     strictMcpConfig: true,
-    tools: ['AskUserQuestion'],
-    disallowedTools: ['Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Agent', 'Task', 'TodoWrite'],
+    tools: request.webSearch ? ['AskUserQuestion', 'WebSearch', 'WebFetch'] : ['AskUserQuestion'],
+    disallowedTools: ['Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'NotebookEdit', ...(request.webSearch ? [] : ['WebFetch', 'WebSearch']), 'Agent', 'Task', 'TodoWrite'],
     mcpServers: {
       phone: phoneServer,
       ...(playwright ? {playwright: playwright.config} : {}),
@@ -74,7 +75,7 @@ async function main() {
     systemPrompt: {
       type: 'preset',
       preset: 'claude_code',
-      append: 'At the beginning of each user turn, before your first tool call, briefly tell the user what you intend to do in their language. All project file access and shell commands must use the mcp__phone__* tools, which run on the user Android device. Never use server-side tools for files or commands. Use paths relative to the phone shared-storage workspace. Use mcp__playwright__* tools for web browsing; this browser runs directly on the backend and has its own profile for this conversation.',
+      append: 'At the beginning of each user turn, before your first tool call, briefly tell the user what you intend to do in their language. All project file access and shell commands must use the mcp__phone__* tools, which run on the user Android device. Never use server-side tools for files or commands. Use paths relative to the phone shared-storage workspace. Use mcp__playwright__* tools for web browsing; this browser runs in the existing Google Cloud Shell session.',
       snapshot: false,
     },
     pathToClaudeCodeExecutable: request.binary,

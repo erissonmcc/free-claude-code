@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 import uuid
 from collections.abc import Mapping
@@ -236,7 +237,7 @@ class ClaudeAgentConnection:
         self._new_thread = False
         return NativeThread(thread_id, permission_defaults={})
 
-    async def fork_thread(self, thread_id: str, item_id: str, title: str) -> NativeThread:
+    async def fork_thread(self, thread_id: str, item_id: str, title: str, *, prompt: str | None = None) -> NativeThread | None:
         worker = str(Path(__file__).with_name("claude_agent_worker.cjs"))
         process = await asyncio.create_subprocess_exec(
             shutil.which("node") or "node", worker, cwd=self._cwd, env=self._env,
@@ -245,13 +246,15 @@ class ClaudeAgentConnection:
         try:
             output, error = await asyncio.wait_for(process.communicate(json.dumps({
                 "type": "fork", "sessionId": thread_id, "itemId": item_id,
-                "cwd": self._cwd, "title": title,
+                "cwd": self._cwd, "title": title, "rewind": prompt is not None, "prompt": prompt,
             }).encode() + b"\n"), timeout=30)
             messages = [json.loads(line) for line in output.splitlines() if line.strip()]
             result = next((message for message in messages if message.get("type") == "fork"), None)
             if process.returncode or result is None:
                 detail = next((message.get("error") for message in messages if message.get("type") == "error"), "SDK não retornou a ramificação.")
                 raise CodeUnavailableError(str(detail))
+            if prompt is not None and result["sessionId"] is None:
+                return None
             return NativeThread(str(uuid.UUID(result["sessionId"])), permission_defaults={})
         finally:
             if process.returncode is None:
@@ -290,7 +293,8 @@ class ClaudeAgentConnection:
             "model": self._model,
             "effort": self._selection.reasoning_effort if self._selection.reasoning_effort != "off" else None,
             "permissionMode": _sdk_permission_mode(self._selection.mode),
-            "env": self._env,
+            "env": {key: value for key, value in self._env.items() if key != "FCC_GOOGLE_SHELL_CREDENTIALS"},
+            "python": sys.executable,
             "binary": self._selection.binary_path,
             "sessionId": self.thread_id,
             "resume": not self._new_thread,

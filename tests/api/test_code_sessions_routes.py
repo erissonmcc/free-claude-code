@@ -811,3 +811,17 @@ async def test_fork_route_returns_new_session_and_validates_revision(code_api, m
     response = await client.post('/admin/api/code/sessions/source/fork', json={**payload, 'expected_revision':0})
     assert response.status_code == 422
     assert fork.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_regenerate_route_passes_selected_answer_and_search_mode(code_api, monkeypatch):
+    from unittest.mock import AsyncMock
+    from free_claude_code.application.code_sessions.models import CodeRun
+    client,code,_,_,_=code_api
+    run=CodeRun(id=str(uuid.uuid4()),session_id='source',text='question',model='p/m')
+    method=AsyncMock(return_value=run)
+    monkeypatch.setattr(code,'regenerate',method)
+    for search in (False,True):
+        response=await client.post('/admin/api/code/sessions/source/regenerate',json={'item_id':'selected','expected_revision':3,'search':search})
+        assert response.status_code == 202
+        method.assert_awaited_with('source','selected',3,search)

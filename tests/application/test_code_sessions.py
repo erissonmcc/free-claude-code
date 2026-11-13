@@ -2532,3 +2532,27 @@ async def test_fork_uses_native_selected_message_and_keeps_original_session(code
     with pytest.raises(CodeConflictError):
         await service.fork_session(source.id, new_id(), answer.id, 999)
     assert connection.fork_thread.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_regenerate_replaces_answer_without_adding_another_user_message(code, monkeypatch):
+    from free_claude_code.application.code_sessions.models import NativeThread
+    service,harness,directory=code
+    service._harnesses["claude"]=harness
+    source=await service._store.create(CodeSession(id=new_id(),cwd=str(directory),model=harness.model,harness="claude",native_thread_id="source-thread",native_permission_defaults=harness.permission_defaults,native_may_have_input=True))
+    run=CodeRun(id=new_id(),session_id=source.id,text="question",model=source.model)
+    user=CodeItem(id=run.id,run_id=run.id,session_id=source.id,sequence=1,kind="user",text="question",complete=True)
+    source,run=await service._store.admit_run(source,run,user,source.revision)
+    answer=CodeItem(id=new_id(),run_id=run.id,session_id=source.id,sequence=2,kind="text",text="discard",complete=True,native_item_id="text:answer:0")
+    await service._store.save_progress(source,source.revision,run=run.model_copy(update={"status":"completed"}),items=(answer,))
+    connection=SimpleNamespace(fork_thread=AsyncMock(return_value=NativeThread("before-question",permission_defaults={})),close=AsyncMock())
+    monkeypatch.setattr(harness,"open_history",AsyncMock(return_value=connection))
+    harness.histories["before-question"] = []
+    replacement=await service.regenerate(source.id,answer.id,source.revision,True)
+    connection.fork_thread.assert_awaited_once_with("source-thread",answer.native_item_id,source.title,prompt="question")
+    assert replacement.id == run.id and "Pesquise na web" in replacement.text
+    await asyncio.wait_for(harness.started.wait(),2)
+    assert [item.id for item in (await service.get_detail(source.id)).items] == [user.id]
+    assert service._owners[source.id].state.next_sequence() > answer.sequence
+    await harness.connections[-1].finish("turn-1")
+    await service.wait_idle(source.id)

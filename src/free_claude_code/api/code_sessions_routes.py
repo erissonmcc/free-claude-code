@@ -50,6 +50,12 @@ class CreatePayload(CommandPayload):
     harness: Literal["codex", "claude"] = "codex"
 
 
+class RegeneratePayload(CommandPayload):
+    item_id: str
+    expected_revision: int = Field(gt=0)
+    search: bool = False
+
+
 class ForkPayload(CommandPayload):
     session_id: str
     item_id: str
@@ -204,6 +210,11 @@ async def create(
             payload.session_id, payload.cwd, payload.harness
         )
     )
+
+
+@router.post("/admin/api/code/sessions/{session_id}/regenerate", status_code=202)
+async def regenerate(session_id: str, payload: RegeneratePayload, services: ApiServices = Depends(get_services)) -> JsonObject:
+    return _run_payload(await _code(services).regenerate(session_id, payload.item_id, payload.expected_revision, payload.search))
 
 
 @router.post("/admin/api/code/sessions/{session_id}/fork", status_code=201)

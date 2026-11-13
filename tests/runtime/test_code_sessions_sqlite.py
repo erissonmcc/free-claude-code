@@ -1052,3 +1052,24 @@ async def test_fork_copies_history_through_run_and_item_without_touching_source(
         await store.fork(source.id, 999, fork.model_copy(update={"id": "stale"}), "i2-2")
     with pytest.raises(Exception):
         await store.get_session("stale")
+
+
+@pytest.mark.asyncio
+async def test_regenerate_removes_selected_answer_and_future_turns_but_keeps_user(store):
+    source = await store.create(CodeSession(id="source", cwd="/work", model="p/m", harness="claude", native_thread_id="old", native_permission_defaults={}))
+    def seed(connection):
+        for ordinal in (1,2,3):
+            run=CodeRun(id=f"r{ordinal}",session_id=source.id,text=f"q{ordinal}",model=source.model,ordinal=ordinal,status="completed")
+            code_store_module._insert(connection,"code_runs",run)
+            for seq,kind in ((1,"user"),(2,"text"),(3,"text")):
+                code_store_module._insert(connection,"code_items",CodeItem(id=f"i{ordinal}-{seq}",session_id=source.id,run_id=run.id,sequence=ordinal*10+seq,kind=kind,text=f"{ordinal}:{seq}",complete=True))
+    await store.database.run(seed)
+    updated=source.model_copy(update={"revision":source.revision+1,"native_thread_id":"before-question"})
+    run=await store.regenerate(updated,source.revision,"i2-2","q2 + research")
+    assert run.id == "r2" and run.status == "preparing" and run.text == "q2 + research"
+    assert [item.id for item in await store.items(source.id,None,None)] == ["i1-1","i1-2","i1-3","i2-1"]
+    assert [r.id for r in await store.runs(source.id)] == ["r1","r2"]
+    assert (await store.get_session(source.id)).native_thread_id == "before-question"
+    with pytest.raises(CodeConflictError):
+        await store.regenerate(updated,source.revision,"i1-2","bad")
+    assert len(await store.items(source.id,None,None)) == 4
