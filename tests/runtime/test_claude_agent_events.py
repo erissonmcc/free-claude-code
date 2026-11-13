@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -53,8 +54,8 @@ def test_worker_passes_thinking_option_only_for_fast_turn(fast):
 const Module = require('node:module');
 const original = Module._load;
 Module._load = function(name, ...args) {
-  if (name.endsWith('@anthropic-ai/claude-agent-sdk')) {
-    return { query: async function* ({prompt, options}) {
+  if (name.endsWith('@anthropic-ai/claude-agent-sdk') || name.includes('/@anthropic-ai/claude-agent-sdk/')) {
+    return { createSdkMcpServer: config => config, tool: (name, description, inputSchema, handler) => ({name, description, inputSchema, handler}), query: async function* ({prompt, options}) {
       const first = await prompt[Symbol.asyncIterator]().next();
       yield {type: 'result', subtype: 'success', result: JSON.stringify({prompt: first.value.message.content, thinking: options.thinking ?? null})};
     }};
@@ -64,9 +65,11 @@ Module._load = function(name, ...args) {
 require(process.argv[1]);
 """
     request = {"fast": fast, "prompt": "olá", "sessionId": "session"}
+    worker_env = dict(os.environ)
+    worker_env.pop("PREFIX", None)
     result = subprocess.run(
         ["node", "-e", script, str(worker)],
-        input=json.dumps(request) + "\n", text=True, capture_output=True, check=True, timeout=10,
+        input=json.dumps(request) + "\n", text=True, capture_output=True, check=True, timeout=10, env=worker_env,
     )
     messages = [json.loads(line) for line in result.stdout.splitlines()]
     payload = json.loads(next(message["result"] for message in messages if message["type"] == "result"))
@@ -83,7 +86,7 @@ def test_send_message_requires_matching_worker_ack():
         stream = asyncio.StreamReader()
         async def wait():
             return 0
-        connection = ClaudeAgentConnection(None, '/tmp', receive, {})
+        connection = ClaudeAgentConnection(None, '/tmp', receive, {}, 'model')
         connection.thread_id = 'session'
         connection._process = SimpleNamespace(returncode=None, stdout=stream, wait=wait,
             stdin=SimpleNamespace(write=writes.append, drain=drain, is_closing=lambda: False))
@@ -112,7 +115,7 @@ def test_concurrent_messages_are_correlated_and_close_releases_pending():
         async def wait():
             return 0
         stream = asyncio.StreamReader()
-        connection = ClaudeAgentConnection(None, '/tmp', receive, {})
+        connection = ClaudeAgentConnection(None, '/tmp', receive, {}, 'model')
         connection.thread_id = 'session'
         connection._process = SimpleNamespace(returncode=0, stdout=stream, wait=wait,
             stdin=SimpleNamespace(write=writes.append, drain=drain, is_closing=lambda: False))
@@ -138,7 +141,7 @@ def test_close_releases_message_waiting_for_ack():
             pass
         async def wait():
             return 0
-        connection = ClaudeAgentConnection(None, '/tmp', None, {})
+        connection = ClaudeAgentConnection(None, '/tmp', None, {}, 'model')
         connection._process = SimpleNamespace(returncode=None, wait=wait,
             terminate=lambda: None, stdin=SimpleNamespace(write=lambda data: None,
             drain=drain, is_closing=lambda: False))
@@ -158,7 +161,7 @@ def test_close_releases_message_blocked_in_drain():
             await asyncio.Event().wait()
         async def wait():
             return 0
-        connection = ClaudeAgentConnection(None, '/tmp', None, {})
+        connection = ClaudeAgentConnection(None, '/tmp', None, {}, 'model')
         connection._process = SimpleNamespace(returncode=None, wait=wait,
             terminate=lambda: None, stdin=SimpleNamespace(write=lambda data: None,
             drain=drain, is_closing=lambda: False))
@@ -180,7 +183,7 @@ def test_ack_is_read_while_permission_is_pending():
         async def wait():
             return 0
         stream = asyncio.StreamReader()
-        connection = ClaudeAgentConnection(None, '/tmp', receive, {})
+        connection = ClaudeAgentConnection(None, '/tmp', receive, {}, 'model')
         connection.thread_id = 'session'
         connection._process = SimpleNamespace(returncode=None, stdout=stream, wait=wait,
             stdin=SimpleNamespace(write=lambda data: None, drain=drain, is_closing=lambda: False))
@@ -204,7 +207,7 @@ def test_send_message_times_out_without_ack(monkeypatch):
         writes = []
         async def drain():
             pass
-        connection = ClaudeAgentConnection(None, '/tmp', None, {})
+        connection = ClaudeAgentConnection(None, '/tmp', None, {}, 'model')
         connection._process = SimpleNamespace(returncode=None, stdin=SimpleNamespace(
             write=writes.append, drain=drain, is_closing=lambda: False))
         with pytest.raises(TimeoutError):
@@ -217,7 +220,7 @@ def test_send_message_times_out_without_ack(monkeypatch):
 
 def test_send_message_rejects_unavailable_worker():
     async def exercise():
-        connection = ClaudeAgentConnection(None, '/tmp', None, {})
+        connection = ClaudeAgentConnection(None, '/tmp', None, {}, 'model')
         for process in (None, SimpleNamespace(returncode=0, stdin=None),
                         SimpleNamespace(returncode=None, stdin=None),
                         SimpleNamespace(returncode=None, stdin=SimpleNamespace(is_closing=lambda: True))):
@@ -236,8 +239,8 @@ def test_worker_streams_input_while_permission_pending_and_exits_with_stdin_open
 const Module = require('node:module');
 const original = Module._load;
 Module._load = function(name, ...args) {
-  if (name.endsWith('@anthropic-ai/claude-agent-sdk')) {
-    return { query: async function* ({prompt, options}) {
+  if (name.endsWith('@anthropic-ai/claude-agent-sdk') || name.includes('/@anthropic-ai/claude-agent-sdk/')) {
+    return { createSdkMcpServer: config => config, tool: (name, description, inputSchema, handler) => ({name, description, inputSchema, handler}), query: async function* ({prompt, options}) {
       const it = prompt[Symbol.asyncIterator]();
       const first = await it.next();
       const decision = await options.canUseTool('Bash', {command: 'pwd'});
@@ -287,8 +290,8 @@ def test_worker_does_not_assume_result_consumed_queued_message():
 const Module = require('node:module');
 const original = Module._load;
 Module._load = function(name, ...args) {
-  if (name.endsWith('@anthropic-ai/claude-agent-sdk')) {
-    return { query: async function* ({prompt, options}) {
+  if (name.endsWith('@anthropic-ai/claude-agent-sdk') || name.includes('/@anthropic-ai/claude-agent-sdk/')) {
+    return { createSdkMcpServer: config => config, tool: (name, description, inputSchema, handler) => ({name, description, inputSchema, handler}), query: async function* ({prompt, options}) {
       const it = prompt[Symbol.asyncIterator]();
       await it.next();
       await options.canUseTool('Bash', {});
@@ -345,7 +348,7 @@ def test_tool_call_and_result_have_distinct_transcript_identities():
         async def wait():
             return 0
 
-        connection = ClaudeAgentConnection(None, "/tmp", receive, {})
+        connection = ClaudeAgentConnection(None, "/tmp", receive, {}, "model")
         connection.thread_id = "thread"
         connection._process = SimpleNamespace(stdout=stream, wait=wait)
         await connection._read_response("turn")
@@ -375,7 +378,7 @@ def test_large_image_tool_result_finishes_turn():
         async def wait():
             return 0
 
-        connection = ClaudeAgentConnection(None, "/tmp", receive, {})
+        connection = ClaudeAgentConnection(None, "/tmp", receive, {}, "model")
         connection.thread_id = "thread"
         connection._process = SimpleNamespace(stdout=stream, wait=wait, returncode=0)
         await connection._read_response("turn")
@@ -401,7 +404,7 @@ def test_worker_failure_emits_terminal_failed_turn():
         async def wait():
             return 1
 
-        connection = ClaudeAgentConnection(None, "/tmp", receive, {})
+        connection = ClaudeAgentConnection(None, "/tmp", receive, {}, "model")
         connection.thread_id = "thread"
         connection._process = SimpleNamespace(stdout=stream, wait=wait, returncode=1)
         await connection._read_response("turn")
@@ -426,7 +429,7 @@ def test_text_snapshots_update_one_entry_before_completion():
         async def wait():
             return 0
 
-        connection = ClaudeAgentConnection(None, "/tmp", receive, {})
+        connection = ClaudeAgentConnection(None, "/tmp", receive, {}, "model")
         connection.thread_id = "thread"
         connection._process = SimpleNamespace(stdout=stream, wait=wait)
         await connection._read_response("turn")
@@ -451,7 +454,7 @@ def test_clarifying_question_requires_and_forwards_selected_answer():
         async def drain():
             pass
 
-        connection = ClaudeAgentConnection(None, "/tmp", receive, {})
+        connection = ClaudeAgentConnection(None, "/tmp", receive, {}, "model")
         connection.thread_id = "thread"
         connection._process = SimpleNamespace(stdin=SimpleNamespace(write=writes.append, drain=drain))
         question = {"question": "Qual opção?", "header": "Escolha", "multiSelect": False,
@@ -474,3 +477,124 @@ def test_clarifying_question_requires_and_forwards_selected_answer():
     assert wire["approved"] is True
     assert wire["input"]["answers"] == {"Qual opção?": "Não"}
     assert wire["input"]["questions"][0]["question"] == "Qual opção?"
+
+
+def test_device_tool_result_is_returned_to_the_worker_through_a_pending_prompt():
+    async def exercise():
+        events = []
+        writes = []
+
+        async def receive(event):
+            events.append(event)
+
+        async def drain():
+            pass
+
+        connection = ClaudeAgentConnection(None, "/tmp", receive, {}, "model")
+        assert callable(getattr(connection, "_emit_device_tool", None))
+        connection.thread_id = "thread"
+        connection._process = SimpleNamespace(
+            stdin=SimpleNamespace(write=writes.append, drain=drain)
+        )
+        task = asyncio.create_task(connection._emit_device_tool("turn", {
+            "id": "worker-call-1",
+            "name": "read_file",
+            "input": {"path": "notes.txt"},
+        }))
+        while not events:
+            await asyncio.sleep(0)
+        prompt = events[0].prompt
+        assert prompt.kind == "device_tool"
+        assert prompt.form["tool"] == "read_file"
+        assert prompt.form["input"] == {"path": "notes.txt"}
+        response = connection.prepare_answer(prompt.request_id, {
+            "device_tool_result": "phone file contents",
+            "is_error": False,
+        })
+        await connection.respond(prompt.request_id, response)
+        await task
+        assert json.loads(writes[0]) == {
+            "type": "device_tool_result",
+            "id": "worker-call-1",
+            "result": "phone file contents",
+            "is_error": False,
+        }
+
+    asyncio.run(exercise())
+
+
+def test_worker_uses_phone_mcp_tools_and_returns_the_app_result_to_the_sdk():
+    from free_claude_code.runtime import claude_agent
+
+    worker = Path(claude_agent.__file__).with_name("claude_agent_worker.cjs")
+    script = r"""
+const assert = require('node:assert/strict');
+const Module = require('node:module');
+const original = Module._load;
+Module._load = function(name, ...args) {
+  if (name.includes('@anthropic-ai/claude-agent-sdk')) {
+    return {
+      createSdkMcpServer: config => config,
+      tool: (name, description, inputSchema, handler) => ({name, description, inputSchema, handler}),
+      query: async function* ({options}) {
+        assert.deepEqual(options.tools, ['AskUserQuestion']);
+        assert.equal(options.strictMcpConfig, true);
+        assert(options.disallowedTools.includes('Read'));
+        const read = options.mcpServers.phone.tools.find(item => item.name === 'read_file');
+        const result = await read.handler({path: 'notes.txt'});
+        yield {type: 'assistant', message: {id: 'assistant', content: [{type: 'tool_use', id: 'call-1', name: 'mcp__phone__read_file', input: {path: 'notes.txt'}}]}};
+        yield {type: 'user', message: {content: [{type: 'tool_result', tool_use_id: 'call-1', content: result.content[0].text, is_error: result.isError === true}]}};
+        yield {type: 'result', subtype: 'success', result: result.content[0].text};
+      },
+    };
+  }
+  if (name === 'zod') {
+    const schema = {optional() { return this; }};
+    return {z: {string: () => schema, boolean: () => schema}};
+  }
+  return original.call(this, name, ...args);
+};
+require(process.argv[1]);
+"""
+
+    async def exercise():
+        env = os.environ.copy()
+        env["FCC_CLAUDE_AGENT_SDK_PATH"] = "/tmp/fake/node_modules/@anthropic-ai/claude-agent-sdk"
+        process = await asyncio.create_subprocess_exec(
+            "node", "-e", script, str(worker),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        try:
+            process.stdin.write(b'{"prompt":"read notes","sessionId":"session"}\n')
+            await process.stdin.drain()
+            request = json.loads(await asyncio.wait_for(process.stdout.readline(), 3))
+            assert request["type"] == "device_tool"
+            assert request["name"] == "read_file"
+            assert request["input"] == {"path": "notes.txt"}
+            response = {
+                "type": "device_tool_result",
+                "id": request["id"],
+                "result": "phone file contents",
+                "is_error": False,
+            }
+            process.stdin.write((json.dumps(response) + "\n").encode())
+            await process.stdin.drain()
+            messages = []
+            while True:
+                message = json.loads(await asyncio.wait_for(process.stdout.readline(), 3))
+                messages.append(message)
+                if message["type"] == "result":
+                    break
+            assert any(message["type"] == "tool_call" and message["name"] == "mcp__phone__read_file" for message in messages)
+            assert any(message["type"] == "tool_result" and message["content"] == "phone file contents" for message in messages)
+            assert next(message["result"] for message in messages if message["type"] == "result") == "phone file contents"
+            assert await asyncio.wait_for(process.wait(), 3) == 0
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+
+    asyncio.run(exercise())

@@ -1,14 +1,35 @@
 const readline = require('node:readline');
-const { query } = require(
-  process.env.FCC_CLAUDE_AGENT_SDK_PATH || require.resolve('@anthropic-ai/claude-agent-sdk'),
-);
+const { createRequire } = require('node:module');
+const fs = require('node:fs');
+const path = require('node:path');
+const nodePrefix = process.env.PREFIX || path.dirname(path.dirname(process.execPath));
+const globalSdkDirectory = path.join(nodePrefix, 'lib', 'node_modules', '@anthropic-ai', 'claude-agent-sdk');
+let sdkDirectory = process.env.FCC_CLAUDE_AGENT_SDK_PATH || globalSdkDirectory;
+let sdkPath = process.env.FCC_CLAUDE_AGENT_SDK_PATH ? path.join(sdkDirectory, 'sdk.mjs') : '@anthropic-ai/claude-agent-sdk';
+if (!process.env.FCC_CLAUDE_AGENT_SDK_PATH) {
+  try {
+    sdkPath = require.resolve(sdkPath);
+  } catch {
+    const globalSdkEntry = path.join(globalSdkDirectory, 'sdk.mjs');
+    if (fs.existsSync(globalSdkEntry)) sdkPath = globalSdkEntry;
+  }
+}
+const { query, createSdkMcpServer, tool } = require(sdkPath);
+try {
+  fs.accessSync(path.join(sdkDirectory, 'package.json'));
+} catch {
+  sdkDirectory = path.dirname(sdkPath);
+}
+const { z } = createRequire(path.join(sdkDirectory, 'package.json'))('zod');
 const { ClaudeTextStream, ClaudeUsageStream } = require('./claude_agent_stream.cjs');
+const { DeviceToolRpc, createPhoneToolServer } = require('./claude_device_tool_bridge.cjs');
 
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 const lines = input[Symbol.asyncIterator]();
 const pending = new Map();
 let nextPermission = 0;
 const send = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
+const deviceTools = new DeviceToolRpc({ send });
 
 async function readInput() {
   const value = await lines.next();
@@ -18,6 +39,7 @@ async function readInput() {
 
 async function main() {
   const request = await readInput();
+  const phoneServer = createPhoneToolServer({ createSdkMcpServer, tool, z, rpc: deviceTools });
   const options = {
     cwd: request.cwd,
     model: request.model,
@@ -25,12 +47,16 @@ async function main() {
     ...(request.fast ? { thinking: { type: 'disabled' } } : {}),
     permissionMode: request.permissionMode,
     settingSources: ['user', 'project', 'local'],
+    strictMcpConfig: true,
+    tools: ['AskUserQuestion'],
+    disallowedTools: ['Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Agent', 'Task', 'TodoWrite'],
+    mcpServers: { phone: phoneServer },
     env: request.env,
     includePartialMessages: true,
     systemPrompt: {
       type: 'preset',
       preset: 'claude_code',
-      append: 'At the beginning of each user turn, before your first tool call, briefly tell the user what you intend to do in their language.',
+      append: 'At the beginning of each user turn, before your first tool call, briefly tell the user what you intend to do in their language. All project file access and shell commands must use the mcp__phone__* tools, which run on the user Android device. Never use server-side tools for files or commands. Use paths relative to the phone shared-storage workspace.',
       snapshot: false,
     },
     pathToClaudeCodeExecutable: request.binary,
@@ -80,6 +106,8 @@ async function main() {
             ? { behavior: 'allow', updatedInput: message.input }
             : { behavior: 'deny', message: message.message || 'The user declined this action.' });
         }
+      } else if (message.type === 'device_tool_result') {
+        deviceTools.resolve(message);
       }
     }
     closePrompt();
@@ -111,6 +139,7 @@ async function main() {
     send({ type: 'error', message: error instanceof Error ? error.message : String(error) });
     process.exitCode = 1;
   } finally {
+    deviceTools.close();
     closePrompt();
     input.close();
     process.stdin.pause();

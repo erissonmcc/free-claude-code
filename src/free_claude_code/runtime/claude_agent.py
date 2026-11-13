@@ -32,6 +32,7 @@ from free_claude_code.harnesses.claude import build_claude_proxy_env
 
 
 _MESSAGE_ACK_TIMEOUT = 10.0
+_DEVICE_TOOL_RESULT_LIMIT = 512 * 1024
 
 
 async def _response_lines(stream):
@@ -215,8 +216,10 @@ class ClaudeAgentConnection:
         self._reader: asyncio.Task[None] | None = None
         self._message_acks: dict[str, asyncio.Future[bool]] = {}
         self._permission_tasks: set[asyncio.Task[None]] = set()
+        self._device_tool_tasks: set[asyncio.Task[None]] = set()
         self._permissions: dict[str | int, asyncio.Future[JsonObject]] = {}
         self._permission_inputs: dict[str, tuple[str, dict[str, Any]]] = {}
+        self._device_tools: dict[str, dict[str, Any]] = {}
         self._closing = False
         self._new_thread = False
 
@@ -358,6 +361,10 @@ class ClaudeAgentConnection:
                     task = asyncio.create_task(self._emit_permission(turn_id, message))
                     self._permission_tasks.add(task)
                     task.add_done_callback(self._permission_done)
+                elif message.get("type") == "device_tool":
+                    task = asyncio.create_task(self._emit_device_tool(turn_id, message))
+                    self._device_tool_tasks.add(task)
+                    task.add_done_callback(self._device_tool_done)
                 elif message.get("type") == "result":
                     terminal_message = message
                 elif message.get("type") == "error":
@@ -408,6 +415,10 @@ class ClaudeAgentConnection:
                 task.cancel()
             if self._permission_tasks:
                 await asyncio.gather(*tuple(self._permission_tasks), return_exceptions=True)
+            for task in tuple(self._device_tool_tasks):
+                task.cancel()
+            if self._device_tool_tasks:
+                await asyncio.gather(*tuple(self._device_tool_tasks), return_exceptions=True)
 
     def _permission_done(self, task: asyncio.Task[None]) -> None:
         self._permission_tasks.discard(task)
@@ -444,6 +455,51 @@ class ClaudeAgentConnection:
             self._permissions.pop(request_id, None)
             self._permission_inputs.pop(request_id, None)
 
+    def _device_tool_done(self, task: asyncio.Task[None]) -> None:
+        self._device_tool_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            process = self._process
+            if process is not None and process.returncode is None:
+                process.terminate()
+
+    async def _emit_device_tool(self, turn_id: str, message: dict[str, Any]) -> None:
+        worker_id = message.get("id")
+        name = message.get("name")
+        tool_input = message.get("input", {})
+        if not isinstance(worker_id, str) or not worker_id or not isinstance(name, str) or not isinstance(tool_input, dict):
+            raise CodeValidationError("Claude sent an invalid phone tool request.")
+        request_id = str(uuid.uuid4())
+        future: asyncio.Future[JsonObject] = asyncio.get_running_loop().create_future()
+        self._device_tools[request_id] = {"worker_id": worker_id, "future": future}
+        await self._sink(HarnessEvent(
+            generation=self.generation,
+            thread_id=self.thread_id,
+            kind="prompt",
+            turn_id=turn_id,
+            prompt=PromptRequest(
+                request_id=request_id,
+                kind="device_tool",
+                form={"tool": name, "input": tool_input},
+                raw=message,
+                item_id=worker_id,
+            ),
+        ))
+        try:
+            response = await future
+            process = self._process
+            if process is None or process.stdin is None or getattr(process.stdin, "is_closing", lambda: False)():
+                return
+            wire = {
+                "type": "device_tool_result",
+                "id": worker_id,
+                "result": response["device_tool_result"],
+                "is_error": response["is_error"],
+            }
+            process.stdin.write((json.dumps(wire, ensure_ascii=False) + "\n").encode())
+            await process.stdin.drain()
+        finally:
+            self._device_tools.pop(request_id, None)
+
     async def _emit_item(
         self,
         turn_id: str,
@@ -474,6 +530,15 @@ class ClaudeAgentConnection:
         )
 
     def prepare_answer(self, request_id: str | int, answer: JsonObject) -> JsonObject:
+        device_tool = self._device_tools.get(str(request_id))
+        if device_tool is not None:
+            result = answer.get("device_tool_result")
+            is_error = answer.get("is_error", False)
+            if not isinstance(result, str) or len(result) > _DEVICE_TOOL_RESULT_LIMIT:
+                raise CodeValidationError("The phone tool result is missing or too large.")
+            if not isinstance(is_error, bool):
+                raise CodeValidationError("The phone tool result status is invalid.")
+            return {"device_tool_result": result, "is_error": is_error}
         if str(request_id) not in self._permissions:
             raise CodeConflictError("This Claude permission prompt is no longer active.")
         if not isinstance(answer.get("approved"), bool):
@@ -498,6 +563,13 @@ class ClaudeAgentConnection:
         return answer
 
     async def respond(self, request_id: str | int, response: JsonObject) -> None:
+        device_tool = self._device_tools.get(str(request_id))
+        if device_tool is not None:
+            future = device_tool["future"]
+            if future.done():
+                raise CodeConflictError("This phone tool request has already been answered.")
+            future.set_result(response)
+            return
         future = self._permissions.get(str(request_id))
         if future is None or future.done():
             raise CodeConflictError("This Claude permission prompt is no longer active.")
@@ -517,6 +589,10 @@ class ClaudeAgentConnection:
         for future in self._permissions.values():
             if not future.done():
                 future.set_result({"approved": False, "message": "FCC session closed."})
+        for device_tool in self._device_tools.values():
+            future = device_tool["future"]
+            if not future.done():
+                future.cancel()
         reader = self._reader
         if reader is not None and not reader.done():
             reader.cancel()
