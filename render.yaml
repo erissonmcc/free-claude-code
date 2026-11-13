@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: starter
     region: oregon
-    buildCommand: pip install uv && uv sync --no-dev && npm install --no-save @anthropic-ai/claude-code @anthropic-ai/claude-agent-sdk
+    buildCommand: sh scripts/render/build.sh
     startCommand: mkdir -p /opt/render/project/src/data/workspace && FCC_CLAUDE_AGENT_SDK_PATH=/opt/render/project/src/node_modules/@anthropic-ai/claude-agent-sdk PATH=/opt/render/project/src/node_modules/.bin:$PATH uv run fcc-server
     healthCheckPath: /health
     autoDeploy: true
@@ -19,6 +19,10 @@ services:
         value: /opt/render/project/src/data
       - key: HOST
         value: 0.0.0.0
+      - key: FCC_PLAYWRIGHT_MCP
+        value: "1"
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: /opt/render/project/src/.playwright-browsers
       - key: FCC_OPEN_BROWSER
         value: "false"
       - key: FCC_ADMIN_AUTH_TOKEN

@@ -23,6 +23,7 @@ try {
 const { z } = createRequire(path.join(sdkDirectory, 'package.json'))('zod');
 const { ClaudeTextStream, ClaudeUsageStream } = require('./claude_agent_stream.cjs');
 const { DeviceToolRpc, createPhoneToolServer } = require('./claude_device_tool_bridge.cjs');
+const { playwrightServer } = require('./claude_playwright.cjs');
 
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 const lines = input[Symbol.asyncIterator]();
@@ -56,13 +57,23 @@ async function main() {
     strictMcpConfig: true,
     tools: ['AskUserQuestion'],
     disallowedTools: ['Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Agent', 'Task', 'TodoWrite'],
-    mcpServers: { phone: phoneServer },
+    mcpServers: {
+      phone: phoneServer,
+      ...(process.env.FCC_PLAYWRIGHT_MCP === '1' ? {
+        playwright: playwrightServer({
+          enabled: true,
+          cli: path.join(path.dirname(require.resolve('@playwright/mcp')), 'cli.js'),
+          home: process.env.HOME || request.cwd,
+          sessionId: request.sessionId,
+        }),
+      } : {}),
+    },
     env: request.env,
     includePartialMessages: true,
     systemPrompt: {
       type: 'preset',
       preset: 'claude_code',
-      append: 'At the beginning of each user turn, before your first tool call, briefly tell the user what you intend to do in their language. All project file access and shell commands must use the mcp__phone__* tools, which run on the user Android device. Never use server-side tools for files or commands. Use paths relative to the phone shared-storage workspace.',
+      append: 'At the beginning of each user turn, before your first tool call, briefly tell the user what you intend to do in their language. All project file access and shell commands must use the mcp__phone__* tools, which run on the user Android device. Never use server-side tools for files or commands. Use paths relative to the phone shared-storage workspace. Use mcp__playwright__* tools for web browsing; this browser runs directly on the backend and has its own profile for this conversation.',
       snapshot: false,
     },
     pathToClaudeCodeExecutable: request.binary,
