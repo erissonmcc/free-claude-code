@@ -47,6 +47,14 @@ async function main() {
     return;
   }
   const phoneServer = createPhoneToolServer({ createSdkMcpServer, tool, z, rpc: deviceTools });
+  const playwright = process.env.FCC_PLAYWRIGHT_MCP === '1'
+    ? await playwrightServer({
+        home: process.env.HOME || request.cwd,
+        sessionId: request.sessionId,
+        createConnection: require('@playwright/mcp').createConnection,
+        chromium: require('playwright').chromium,
+      })
+    : undefined;
   const options = {
     cwd: request.cwd,
     model: request.model,
@@ -59,14 +67,7 @@ async function main() {
     disallowedTools: ['Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Agent', 'Task', 'TodoWrite'],
     mcpServers: {
       phone: phoneServer,
-      ...(process.env.FCC_PLAYWRIGHT_MCP === '1' ? {
-        playwright: playwrightServer({
-          enabled: true,
-          cli: path.join(path.dirname(require.resolve('@playwright/mcp')), 'cli.js'),
-          home: process.env.HOME || request.cwd,
-          sessionId: request.sessionId,
-        }),
-      } : {}),
+      ...(playwright ? {playwright: playwright.config} : {}),
     },
     env: request.env,
     includePartialMessages: true,
@@ -156,6 +157,7 @@ async function main() {
     send({ type: 'error', message: error instanceof Error ? error.message : String(error) });
     process.exitCode = 1;
   } finally {
+    if (playwright) await playwright.close().catch(() => {});
     deviceTools.close();
     closePrompt();
     input.close();
