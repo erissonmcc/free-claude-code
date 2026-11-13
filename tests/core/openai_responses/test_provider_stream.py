@@ -32,6 +32,18 @@ def _terminal_usage(usage: dict[str, object]) -> dict[str, object]:
     )
 
 
+def _text_blocks(events):
+    blocks = {}
+    for event in events:
+        block = event.data.get("content_block", {})
+        delta = event.data.get("delta", {})
+        if event.event == "content_block_start" and block.get("type") == "text":
+            blocks[event.data["index"]] = ""
+        elif event.event == "content_block_delta" and delta.get("type") == "text_delta":
+            blocks[event.data["index"]] += delta["text"]
+    return list(blocks.values())
+
+
 def test_responses_provider_stream_preserves_reasoning_tools_usage_and_ids() -> None:
     stream = ResponsesProviderStream(
         message_id="msg_test",
@@ -153,6 +165,137 @@ def test_responses_provider_stream_preserves_reasoning_tools_usage_and_ids() -> 
         "cache_read_input_tokens": 15,
         "cache_creation_input_tokens": 3,
     }
+
+
+def test_consecutive_message_items_keep_text_in_separate_content_blocks() -> None:
+    stream = ResponsesProviderStream(
+        message_id="msg_test", model="openai/gpt-test", input_tokens=0
+    )
+    output = stream.start()
+    for item_id, text in (("msg_first", "Intermediate"), ("msg_final", "Final")):
+        output.extend(
+            stream.feed(
+                "response.output_item.added",
+                {
+                    "item": {
+                        "id": item_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [],
+                    }
+                },
+            )
+        )
+        output.extend(
+            stream.feed(
+                "response.output_text.delta",
+                {
+                    "item_id": item_id,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": text,
+                },
+            )
+        )
+        output.extend(
+            stream.feed(
+                "response.output_item.done",
+                {
+                    "item": {
+                        "id": item_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": text}],
+                    }
+                },
+            )
+        )
+    output.extend(
+        stream.feed("response.completed", {"response": {"usage": {}}})
+    )
+
+    events = parse_sse_text("".join(output))
+    assert _text_blocks(events) == ["Intermediate", "Final"]
+
+
+def test_message_confirmation_emits_content_when_no_text_delta_arrived() -> None:
+    stream = ResponsesProviderStream(
+        message_id="msg_test", model="openai/gpt-test", input_tokens=0
+    )
+    output = stream.start()
+    output.extend(
+        stream.feed(
+            "response.output_item.done",
+            {
+                "item": {
+                    "id": "msg_final",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "Confirmed only"}],
+                }
+            },
+        )
+    )
+    output.extend(
+        stream.feed("response.completed", {"response": {"usage": {}}})
+    )
+    events = parse_sse_text("".join(output))
+    text = "".join(_text_blocks(events))
+    assert text == "Confirmed only"
+
+
+def test_message_content_indices_keep_multiple_text_blocks_distinct() -> None:
+    stream = ResponsesProviderStream(
+        message_id="msg_test", model="openai/gpt-test", input_tokens=0
+    )
+    output = stream.start()
+    output.extend(
+        stream.feed(
+            "response.output_text.delta",
+            {
+                "item_id": "msg_multi",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "First block",
+            },
+        )
+    )
+    output.extend(
+        stream.feed(
+            "response.output_text.delta",
+            {
+                "item_id": "msg_multi",
+                "output_index": 0,
+                "content_index": 1,
+                "delta": "Second block",
+            },
+        )
+    )
+    output.extend(
+        stream.feed(
+            "response.output_item.done",
+            {
+                "item": {
+                    "id": "msg_multi",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [
+                        {"type": "output_text", "text": "First block"},
+                        {"type": "output_text", "text": "Second block"},
+                    ],
+                }
+            },
+        )
+    )
+    output.extend(
+        stream.feed("response.completed", {"response": {"usage": {}}})
+    )
+
+    events = parse_sse_text("".join(output))
+    assert _text_blocks(events) == ["First block", "Second block"]
 
 
 @pytest.mark.parametrize(

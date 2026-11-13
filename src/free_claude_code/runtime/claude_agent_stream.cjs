@@ -6,7 +6,6 @@ class ClaudeTextStream {
   constructor() {
     this.messageId = null;
     this.blocks = new Map();
-    this.activeIndex = null;
   }
 
   frame(block) {
@@ -20,10 +19,8 @@ class ClaudeTextStream {
       if (event.type === 'message_start') {
         this.messageId = event.message.id;
         this.blocks.clear();
-        this.activeIndex = null;
       } else if (event.type === 'content_block_start') {
         if (event.content_block.type === 'text') {
-          this.activeIndex = event.index;
           this.blocks.set(event.index, {
             id: `text:${this.messageId}:${event.index}`,
             text: event.content_block.text || '',
@@ -49,8 +46,9 @@ class ClaudeTextStream {
       for (const [index, content] of (message.message.content || []).entries()) {
         if (content.type !== 'text') continue;
         const streamed = !message.parent_tool_use_id && message.message.id === this.messageId
-          ? this.blocks.get(this.activeIndex) : null;
+          ? this.blocks.get(index) : null;
         if (streamed) {
+          if (streamed.complete && streamed.text === content.text) continue;
           streamed.text = content.text;
           streamed.complete = true;
           output.push(this.frame(streamed));

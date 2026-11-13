@@ -159,6 +159,46 @@ async def test_multiple_messages_reconcile_independently(code_api):
 
 
 @pytest.mark.asyncio
+async def test_consecutive_assistant_messages_persist_and_return_as_separate_items(
+    code_api,
+):
+    client, code, harness, folder, _ = code_api
+    code._harnesses["claude"] = harness
+    session = await code.create_session(str(uuid.uuid4()), str(folder), "claude")
+    run_id = str(uuid.uuid4())
+    await code.send(
+        session.id,
+        run_id,
+        session.revision,
+        "prompt",
+        expected_epoch=code.epoch,
+    )
+    await asyncio.wait_for(harness.started.wait(), 2)
+    connection = harness.connections[0]
+    await connection.text(
+        "turn-1", "text:message-one:0", "Intermediate", complete=True
+    )
+    await connection.text(
+        "turn-1", "text:message-two:0", "Final answer", complete=True
+    )
+
+    stored = await code._store.run_items(session.id, run_id)
+    assistant_items = [item for item in stored if item.kind == "text"]
+    assert [item.text for item in assistant_items] == ["Intermediate", "Final answer"]
+    assert len({item.native_item_id for item in assistant_items}) == 2
+
+    response = await client.get(f"/admin/api/code/sessions/{session.id}")
+    assert response.status_code == 200
+    returned_items = [
+        item for item in response.json()["items"] if item["kind"] == "text"
+    ]
+    assert [item["text"] for item in returned_items] == [
+        "Intermediate",
+        "Final answer",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_message_rejects_missing_bridge_and_non_claude(code_api):
     client, code, harness, folder, _ = code_api
     session = await create_session(code_api)

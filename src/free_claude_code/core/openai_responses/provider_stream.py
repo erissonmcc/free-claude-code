@@ -39,6 +39,11 @@ class _ToolState:
     stopped: bool = False
 
 
+@dataclass(slots=True)
+class _TextState:
+    received_delta: bool = False
+
+
 class ResponsesProviderStream:
     """Stateful one-way adapter for one upstream response."""
 
@@ -63,6 +68,8 @@ class ResponsesProviderStream:
         self.generated_output = False
         self._tool_names = tool_names or OpenAIToolNameCodec.from_names(())
         self._tools: dict[str, _ToolState] = {}
+        self._texts: dict[tuple[str, int], _TextState] = {}
+        self._active_text: tuple[str, int] | None = None
         self._encrypted_reasoning: dict[str, str] = {}
 
     def start(self) -> list[str]:
@@ -124,9 +131,24 @@ class ResponsesProviderStream:
         delta = data.get("delta")
         if not isinstance(delta, str) or not delta:
             return []
-        events = list(self.ledger.ensure_text_block())
+        item_id = _string(data.get("item_id"))
+        output_index = _integer(data.get("output_index"))
+        content_index = _integer(data.get("content_index")) or 0
+        identity = (item_id or f"output:{output_index}", content_index)
+        events = self._start_text(identity)
         events.append(self.ledger.emit_text_delta(delta))
+        self._texts.setdefault(identity, _TextState()).received_delta = True
         self.generated_output = True
+        return events
+
+    def _start_text(self, identity: tuple[str, int]) -> list[str]:
+        events: list[str] = []
+        if self._active_text != identity:
+            events.extend(self.ledger.close_content_blocks())
+            events.extend(self.ledger.ensure_text_block())
+            self._active_text = identity
+        elif not self.ledger.blocks.text_started:
+            events.extend(self.ledger.ensure_text_block())
         return events
 
     def _tool_delta(self, data: dict[str, Any]) -> list[str]:
@@ -177,6 +199,28 @@ class ResponsesProviderStream:
                 events.append(self.ledger.stop_tool_block(state.tool_index))
                 state.stopped = True
                 self.ledger.blocks.tool_states[state.tool_index].started = False
+            return events
+        if item_type == "message":
+            events: list[str] = []
+            content = item.get("content")
+            if isinstance(content, list):
+                for content_index, part in enumerate(content):
+                    if not isinstance(part, dict) or part.get("type") != "output_text":
+                        continue
+                    text = part.get("text")
+                    if not isinstance(text, str) or not text:
+                        continue
+                    identity = (item_id, content_index)
+                    state = self._texts.get(identity)
+                    if state is not None and state.received_delta:
+                        continue
+                    events.extend(self._start_text(identity))
+                    events.append(self.ledger.emit_text_delta(text))
+                    self._texts.setdefault(identity, _TextState()).received_delta = True
+                    self.generated_output = True
+            if self._active_text is not None and self._active_text[0] == item_id:
+                events.extend(self.ledger.close_content_blocks())
+                self._active_text = None
             return events
         if item_type == "reasoning":
             encrypted = item.get("encrypted_content")

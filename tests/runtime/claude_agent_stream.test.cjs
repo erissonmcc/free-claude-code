@@ -70,6 +70,31 @@ test('assistant text retains its streamed identity after a tool block starts', (
   assert.equal(final.id, first.id);
 });
 
+test('assistant confirmation reconciles each streamed text block by its own index', () => {
+  const stream = new ClaudeTextStream();
+  start(stream);
+  block(stream, 0);
+  const first = delta(stream, 0, 'Primeira parte')[0];
+  stream.accept({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+  block(stream, 2);
+  const second = delta(stream, 2, 'Segunda parte')[0];
+
+  const confirmed = stream.accept({
+    type: 'assistant',
+    message: { id: 'message', content: [
+      { type: 'text', text: 'Primeira parte' },
+      { type: 'tool_use', id: 'tool-1', name: 'Bash', input: {} },
+      { type: 'text', text: 'Segunda parte' },
+    ] },
+  });
+
+  assert.deepEqual(confirmed.map(item => item.id), [second.id]);
+  assert.deepEqual(confirmed.map(item => item.text), ['Segunda parte']);
+  assert.equal(stream.blocks.get(0).text, 'Primeira parte');
+  assert.equal(stream.blocks.get(0).complete, true);
+  assert.equal(confirmed[0].complete, true);
+});
+
 test('turn completion finalizes cut-off text without dropping it', () => {
   const stream = new ClaudeTextStream();
   start(stream);
